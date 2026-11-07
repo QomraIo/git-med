@@ -1,7 +1,11 @@
 mod core;
+mod tester;
+mod views;
+
 use core::add::add;
 use core::init::init;
 use std::env;
+use tester::generate::generate;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -16,6 +20,7 @@ fn main() {
     match command.as_str() {
         "init" => init(&args),
         "add" => add(&args),
+        "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }
 }
