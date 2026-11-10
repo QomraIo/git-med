@@ -1,3 +1,5 @@
+use crate::core::tree::Node;
+use crate::views::get_view;
 use regex::Regex;
 use std::collections::VecDeque;
 use std::fs;
@@ -17,7 +19,45 @@ fn should_skip(path: &Path, skip: &[&str]) -> bool {
 }
 
 fn index(path: &Path) {
-    print!("path to print is {0} \n", path.to_str().unwrap())
+    print!("path to print is {0} \n", path.to_str().unwrap());
+    let view_handler = get_view("qomra").unwrap().index(path);
+
+    let task = view_handler.task;
+    let source = view_handler.source;
+    let subject = view_handler.subject;
+    let study = view_handler.study;
+    let series = view_handler.series;
+    let instance = view_handler.instance;
+
+    match task {
+        Some(task) => {} // index task
+        None => {}       // index root (global metadata) and return
+    }
+
+    match source {
+        Some(source) => {} // index source
+        None => (),        // return
+    }
+
+    match subject {
+        Some(subject) => {} // index subject
+        None => (),         // return
+    }
+
+    match study {
+        Some(study) => {} // index study
+        None => (),       // return
+    }
+
+    match series {
+        Some(series) => {} // index series
+        None => (),        // return
+    }
+
+    match instance {
+        Some(instance) => {} // index instance
+        None => (),          // return
+    }
 }
 
 fn dfs() {
@@ -64,4 +104,6 @@ fn dfs() {
 pub fn add(_args: &Vec<String>) {
     print!("HI add");
     dfs();
+
+    let root = Node::new([0u8; 16]);
 }

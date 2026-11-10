@@ -1,41 +1,46 @@
 use crate::views::traits::View;
-use crate::views::types::ViewAttributes;
-use crate::views::utils::get_name;
+use crate::views::types::{ViewAttributes, ViewAttributesIndex};
+use crate::views::utils::{get_name, string2buf128};
 use std::fs::read_to_string;
 use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
-pub struct Brats {
-    pub subject: String,
-    pub study: String,
-    pub series: String,
-    pub instance: String,
-
-    pub source: String,
-    pub task: String,
-}
+pub struct Brats {}
 
 impl View for Brats {
-    fn index(&mut self, path: &Path) {
+    fn index(&mut self, path: &Path) -> ViewAttributesIndex {
         let mut ancestors = path.ancestors();
 
-        self.instance = get_name(&ancestors.next());
-        self.series = format!("series_{}", self.instance);
+        let instance_path = ancestors.next();
+        let instance_str = instance_path
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let instance = get_name(&instance_path);
 
-        let next_name = get_name(&ancestors.next());
-        if next_name.starts_with("study") {
-            self.study = next_name;
-            self.subject = get_name(&ancestors.next());
+        let series = Some(string2buf128(&format!("series_{}", instance_str)));
+
+        let next_path = ancestors.next();
+        let next_str = next_path
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        let (subject, study) = if next_str.starts_with("study") {
+            let study = get_name(&next_path);
+            let subject = get_name(&ancestors.next());
+            (subject, study)
         } else {
-            self.subject = next_name;
-            self.study = format!("study_{}", self.subject);
-        }
+            let subject = get_name(&next_path);
+            let study = Some(string2buf128(&format!("study_{}", next_str)));
+            (subject, study)
+        };
 
         // read the sidecar .view.<filename> (source\ntask) in txt if present
         let sidecar_path = path
             .parent()
-            .map(|p| p.join(format!(".view.{}", self.instance)))
+            .map(|p| p.join(format!(".view.{}", instance_str)))
             .filter(|p| p.exists());
 
         let file_to_read = sidecar_path.as_deref().unwrap_or(path);
@@ -46,12 +51,23 @@ impl View for Brats {
             .map(String::from)
             .collect();
 
-        self.source = others.get(0).cloned().unwrap_or_default();
-        self.task = if self.instance.contains("_seg") {
-            "segmentation".to_string()
+        let source = Some(string2buf128(
+            others.get(0).map(String::as_str).unwrap_or_default(),
+        ));
+        let task = Some(if instance_str.contains("_seg") {
+            string2buf128("segmentation")
         } else {
-            others.get(1).cloned().unwrap_or_default()
-        };
+            string2buf128(others.get(1).map(String::as_str).unwrap_or_default())
+        });
+
+        ViewAttributesIndex {
+            subject,
+            study,
+            series,
+            instance,
+            source,
+            task,
+        }
     }
 
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String) {
@@ -119,14 +135,20 @@ mod tests {
             .join("subject_001_study_001_t1.nii.gz");
 
         let mut brats = Brats::default();
-        brats.index(&file_path);
+        let brats = brats.index(&file_path);
 
-        assert_eq!(brats.subject, "subject_001");
-        assert_eq!(brats.study, "study_001");
-        assert_eq!(brats.series, "series_subject_001_study_001_t1.nii.gz");
-        assert_eq!(brats.instance, "subject_001_study_001_t1.nii.gz");
-        assert_eq!(brats.source, "clinic");
-        assert_eq!(brats.task, "data");
+        assert_eq!(brats.subject, Some(string2buf128("subject_001")));
+        assert_eq!(brats.study, Some(string2buf128("study_001")));
+        assert_eq!(
+            brats.series,
+            Some(string2buf128("series_subject_001_study_001_t1.nii.gz"))
+        );
+        assert_eq!(
+            brats.instance,
+            Some(string2buf128("subject_001_study_001_t1.nii.gz"))
+        );
+        assert_eq!(brats.source, Some(string2buf128("clinic")));
+        assert_eq!(brats.task, Some(string2buf128("data")));
     }
 
     #[test]
@@ -139,14 +161,20 @@ mod tests {
             .join("subject_001_study_001_seg.nii.gz");
 
         let mut brats = Brats::default();
-        brats.index(&file_path);
+        let brats = brats.index(&file_path);
 
-        assert_eq!(brats.subject, "subject_001");
-        assert_eq!(brats.study, "study_001");
-        assert_eq!(brats.series, "series_subject_001_study_001_seg.nii.gz");
-        assert_eq!(brats.instance, "subject_001_study_001_seg.nii.gz");
-        assert_eq!(brats.source, "consensus");
-        assert_eq!(brats.task, "segmentation");
+        assert_eq!(brats.subject, Some(string2buf128("subject_001")));
+        assert_eq!(brats.study, Some(string2buf128("study_001")));
+        assert_eq!(
+            brats.series,
+            Some(string2buf128("series_subject_001_study_001_seg.nii.gz"))
+        );
+        assert_eq!(
+            brats.instance,
+            Some(string2buf128("subject_001_study_001_seg.nii.gz"))
+        );
+        assert_eq!(brats.source, Some(string2buf128("consensus")));
+        assert_eq!(brats.task, Some(string2buf128("segmentation")));
     }
 
     #[test]

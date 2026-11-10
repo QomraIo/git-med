@@ -1,33 +1,31 @@
 use crate::views::traits::View;
-use crate::views::types::ViewAttributes;
-use crate::views::utils::get_name;
+use crate::views::types::{ViewAttributes, ViewAttributesIndex};
+use crate::views::utils::{get_name, string2buf128};
 use std::fs::read_to_string;
 use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
-pub struct Dicom {
-    pub subject: String,
-    pub study: String,
-    pub series: String,
-    pub instance: String,
-
-    pub source: String,
-    pub task: String,
-}
+pub struct Dicom {}
 
 impl View for Dicom {
-    fn index(&mut self, path: &Path) {
+    fn index(&mut self, path: &Path) -> ViewAttributesIndex {
         let mut ancestors = path.ancestors();
 
-        self.instance = get_name(&ancestors.next());
-        self.series = get_name(&ancestors.next());
-        self.study = get_name(&ancestors.next());
-        self.subject = get_name(&ancestors.next());
+        let instance_path = ancestors.next();
+        let instance_str = instance_path
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        let instance = get_name(&instance_path);
+        let series = get_name(&ancestors.next());
+        let study = get_name(&ancestors.next());
+        let subject = get_name(&ancestors.next());
 
         let sidecar_path = path
             .parent()
-            .map(|p| p.join(format!(".view.{}", self.instance)))
+            .map(|p| p.join(format!(".view.{}", instance_str)))
             .filter(|p| p.exists());
 
         let file_to_read = sidecar_path.as_deref().unwrap_or(path);
@@ -38,8 +36,21 @@ impl View for Dicom {
             .map(String::from) // make each slice into a string
             .collect(); // gather them together into a vector
 
-        self.source = others.get(0).cloned().unwrap_or_default();
-        self.task = others.get(1).cloned().unwrap_or_default();
+        let source = Some(string2buf128(
+            others.get(0).map(String::as_str).unwrap_or_default(),
+        ));
+        let task = Some(string2buf128(
+            others.get(1).map(String::as_str).unwrap_or_default(),
+        ));
+
+        ViewAttributesIndex {
+            subject,
+            study,
+            series,
+            instance,
+            source,
+            task,
+        }
     }
 
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String) {
@@ -108,19 +119,19 @@ mod tests {
             .join("instance_001.dcm");
 
         let mut dicom = Dicom::default();
-        dicom.index(&file_path);
+        let dicom = dicom.index(&file_path);
 
-        assert_eq!(dicom.subject, "subject_001");
-        assert_eq!(dicom.study, "study_001");
-        assert_eq!(dicom.series, "series_001");
-        assert_eq!(dicom.instance, "instance_001.dcm");
-        assert_eq!(dicom.source, "clinic");
-        assert_eq!(dicom.task, "data");
+        assert_eq!(dicom.subject, Some(string2buf128("subject_001")));
+        assert_eq!(dicom.study, Some(string2buf128("study_001")));
+        assert_eq!(dicom.series, Some(string2buf128("series_001")));
+        assert_eq!(dicom.instance, Some(string2buf128("instance_001.dcm")));
+        assert_eq!(dicom.source, Some(string2buf128("clinic")));
+        assert_eq!(dicom.task, Some(string2buf128("data")));
     }
 
     #[test]
     fn test_view() {
-        let ctx = TestContext::setup();
+        let _ctx = TestContext::setup();
 
         let dicom = Dicom::default();
 

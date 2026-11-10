@@ -1,30 +1,24 @@
 use crate::views::traits::View;
-use crate::views::types::ViewAttributes;
+use crate::views::types::{ViewAttributes, ViewAttributesIndex};
 use crate::views::utils::get_name;
 use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
-pub struct Qomra {
-    pub subject: String,
-    pub study: String,
-    pub series: String,
-    pub instance: String,
-
-    pub source: String,
-    pub task: String,
-}
+pub struct Qomra {}
 
 impl View for Qomra {
-    fn index(&mut self, path: &Path) {
+    fn index(&mut self, path: &Path) -> ViewAttributesIndex {
         let mut ancestors = path.ancestors();
 
-        self.instance = get_name(&ancestors.next());
-        self.series = get_name(&ancestors.next());
-        self.study = get_name(&ancestors.next());
-        self.subject = get_name(&ancestors.next());
-        self.source = get_name(&ancestors.next());
-        self.task = get_name(&ancestors.next());
+        ViewAttributesIndex {
+            instance: get_name(&ancestors.next()),
+            series: get_name(&ancestors.next()),
+            study: get_name(&ancestors.next()),
+            subject: get_name(&ancestors.next()),
+            source: get_name(&ancestors.next()),
+            task: get_name(&ancestors.next()),
+        }
     }
 
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String) {
@@ -44,6 +38,7 @@ impl View for Qomra {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::views::utils::string2buf128;
     use std::fs::remove_dir_all;
     use std::path::{Path, PathBuf};
 
@@ -98,14 +93,14 @@ mod tests {
             .join("instance_001.dcm");
 
         let mut qomra = Qomra::default();
-        qomra.index(&file_path);
+        let qomra = qomra.index(&file_path);
 
-        assert_eq!(qomra.task, "data");
-        assert_eq!(qomra.source, "clinic");
-        assert_eq!(qomra.subject, "subject_001");
-        assert_eq!(qomra.study, "study_001");
-        assert_eq!(qomra.series, "series_001");
-        assert_eq!(qomra.instance, "instance_001.dcm");
+        assert_eq!(qomra.task, Some(string2buf128("data")));
+        assert_eq!(qomra.source, Some(string2buf128("clinic")));
+        assert_eq!(qomra.subject, Some(string2buf128("subject_001")));
+        assert_eq!(qomra.study, Some(string2buf128("study_001")));
+        assert_eq!(qomra.series, Some(string2buf128("series_001")));
+        assert_eq!(qomra.instance, Some(string2buf128("instance_001.dcm")));
     }
 
     #[test]
