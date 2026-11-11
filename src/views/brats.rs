@@ -1,3 +1,4 @@
+use crate::core::tree::NodeRef;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
 use crate::views::utils::{get_name, string2buf128};
@@ -81,6 +82,64 @@ impl View for Brats {
             path,
             format!("{0}\n{1}", view_attributes.source, view_attributes.task),
         )
+    }
+
+    fn index_root(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_task(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_source(&self, path: &Path, node: &NodeRef, task_id: &[u8; 16]) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_subject(
+        &self,
+        path: &Path,
+        node: &NodeRef,
+        task_id: &[u8; 16],
+        source_id: &[u8; 16],
+    ) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_study(
+        &self,
+        path: &Path,
+        node: &NodeRef,
+        task_id: &[u8; 16],
+        source_id: &[u8; 16],
+        subject_id: &[u8; 16],
+    ) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_series(
+        &self,
+        path: &Path,
+        node: &NodeRef,
+        task_id: &[u8; 16],
+        source_id: &[u8; 16],
+        subject_id: &[u8; 16],
+        study_id: &[u8; 16],
+    ) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn index_instance(
+        &self,
+        path: &Path,
+        node: &NodeRef,
+        task_id: &[u8; 16],
+        source_id: &[u8; 16],
+        subject_id: &[u8; 16],
+        study_id: &[u8; 16],
+        series_id: &[u8; 16],
+    ) -> Result<(), ()> {
+        Err(())
     }
 }
 

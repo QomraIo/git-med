@@ -1,4 +1,4 @@
-use crate::core::tree::Node;
+use crate::core::tree::{ChildrenType, Node};
 use crate::views::get_view;
 use regex::Regex;
 use std::collections::VecDeque;
@@ -102,8 +102,14 @@ fn dfs() {
 }
 
 pub fn add(_args: &Vec<String>) {
-    print!("HI add");
+    // create index.lock if not exists
+    let index_lock = PathBuf::from(".git-med/index.lock");
+    if !index_lock.exists() {
+        fs::File::create(&index_lock).unwrap();
+    }
+    let root = Node::new([0u8; 16], ChildrenType::Attributes);
     dfs();
 
-    let root = Node::new([0u8; 16]);
+    // rename index.lock to index
+    fs::rename(&index_lock, ".git-med/index").unwrap();
 }

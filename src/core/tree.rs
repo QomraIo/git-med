@@ -1,3 +1,5 @@
+// save, load and tests are vibed. I'm thinking about changing the logic soon
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -6,11 +8,21 @@ use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use blake3::Hash;
+
 use crate::files::types::FileMetadata;
 
 // Type aliases make the signatures much cleaner and easier to read
 pub type NodeRef = Rc<RefCell<Node>>;
 pub type WeakNodeRef = Weak<RefCell<Node>>;
+
+/// Selector for initializing a node's child container without allocating upfront.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildrenType {
+    Attributes,
+    Files,
+    None,
+}
 
 pub enum Children {
     Attributes(BTreeMap<[u8; 16], NodeRef>), // attribute has other attributes
@@ -25,9 +37,7 @@ impl std::fmt::Debug for Children {
                 .debug_struct("Attributes")
                 .field("count", &map.len())
                 .finish(),
-            Children::Files(map) => {
-                f.debug_struct("Files").field("count", &map.len()).finish()
-            }
+            Children::Files(map) => f.debug_struct("Files").field("count", &map.len()).finish(),
             Children::None => write!(f, "None"),
         }
     }
@@ -35,16 +45,6 @@ impl std::fmt::Debug for Children {
 
 // #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub type NodeMetadata = FileMetadata;
-
-impl Default for NodeMetadata {
-    fn default() -> Self {
-        Self {
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            size: None,
-        }
-    }
-}
 
 pub struct Node {
     pub id: [u8; 16],
@@ -59,12 +59,12 @@ pub struct Node {
     pub node_metadata: NodeMetadata,
     pub meta_metadata: NodeMetadata,
 
-    pub draft_meta_metadata: NodeMetadata,
-    pub draft_node_metadata: NodeMetadata,
+    pub draft_meta_metadata: Option<NodeMetadata>, // some views need to make a draft to collect info from multiple files
+    pub draft_node_metadata: Option<NodeMetadata>,
 
-    pub self_hash: String,
-    pub meta_hash: String,
-    pub child_hash: Option<String>, //  leaf node (file) has no child
+    pub self_hash: Option<Hash>,
+    pub meta_hash: Option<Hash>,
+    pub child_hash: Option<Hash>, //  leaf node (file) has no child
 }
 
 impl std::fmt::Debug for Node {
@@ -83,26 +83,31 @@ impl std::fmt::Debug for Node {
 }
 
 pub enum ChildType {
-    ID([u8; 16]),
-    REF(NodeRef),
+    Id([u8; 16]),
+    Ref(NodeRef),
 }
 
 impl Node {
-    /// Create a new detached node
-    pub fn new(id: [u8; 16]) -> NodeRef {
+    /// Create a new detached node with the specified child container type.
+    pub fn new(id: [u8; 16], children_type: ChildrenType) -> NodeRef {
+        let children = match children_type {
+            ChildrenType::Attributes => Children::Attributes(BTreeMap::new()),
+            ChildrenType::Files => Children::Files(BTreeMap::new()),
+            ChildrenType::None => Children::None,
+        };
         Rc::new(RefCell::new(Node {
             id,
-            children: Children::None,
+            children,
             parent: None,
             visited: false,
-            valid_child_hash: true,
-            valid_self_hash: true,
+            valid_child_hash: false,
+            valid_self_hash: false,
             node_metadata: NodeMetadata::default(),
             meta_metadata: NodeMetadata::default(),
-            draft_meta_metadata: NodeMetadata::default(),
-            draft_node_metadata: NodeMetadata::default(),
-            self_hash: String::new(),
-            meta_hash: String::new(),
+            draft_meta_metadata: None,
+            draft_node_metadata: None,
+            self_hash: None,
+            meta_hash: None,
             child_hash: None,
         }))
     }
@@ -112,48 +117,61 @@ impl Node {
         self.parent.as_ref().and_then(|weak| weak.upgrade())
     }
 
-    pub fn insert(&mut self, parent_ref: &NodeRef, child: ChildType) -> Result<NodeRef, ()> {
-        let child = match child {
-            ChildType::ID(id) => Node::new(id),
-            ChildType::REF(child) => child,
-        };
-
-        // 1. Set child's parent to a Weak pointer of this parent
-        child.borrow_mut().parent = Some(Rc::downgrade(parent_ref));
-
-        // 2. Insert strong reference into parent's children map
-        match &mut self.children {
-            Children::Attributes(map) | Children::Files(map) => {
-                map.insert(child.borrow().id, Rc::clone(&child));
-                Ok(child)
-            }
-            Children::None => Err(()),
+    /// Mark `valid_child_hash` as `false` for all ancestor nodes up to the root
+    pub fn invalidate_ancestors_hash(&self) {
+        let mut current = self.parent();
+        while let Some(parent_ref) = current {
+            let mut parent = parent_ref.borrow_mut();
+            parent.valid_child_hash = false;
+            current = parent.parent();
         }
     }
 
-    /// Save this node and its entire subtree to a file at `path`
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), TreeError> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+    /// Insert a child node (or create one from an ID) under `parent_ref`.
+    pub fn insert(parent_ref: &NodeRef, child: ChildType) -> Result<NodeRef, ()> {
+        if let ChildType::Ref(ref child_ref) = child {
+            // Prevent self-insertion or ancestor cycles before mutating links.
+            let mut ancestor = Some(Rc::clone(parent_ref));
+            while let Some(curr) = ancestor {
+                if Rc::ptr_eq(&curr, child_ref) {
+                    return Err(());
+                }
+                ancestor = curr.borrow().parent();
             }
         }
-        let tmp_file_name = format!(
-            ".{}.tmp.{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        );
-        let tmp_path = path.with_file_name(tmp_file_name);
-        {
-            let file = File::create(&tmp_path)?;
-            let mut writer = BufWriter::new(file);
-            write_header(&mut writer)?;
-            serialize_node_internal(self, &mut writer)?;
-            writer.flush()?;
+
+        let mut parent = parent_ref.borrow_mut();
+        let map = match &mut parent.children {
+            Children::Attributes(map) | Children::Files(map) => map,
+            Children::None => return Err(()),
+        };
+
+        let child_ref = match child {
+            ChildType::Id(id) => Node::new(id, ChildrenType::None),
+            ChildType::Ref(node_ref) => node_ref,
+        };
+
+        let child_id = {
+            let mut child_node = child_ref.borrow_mut();
+            child_node.parent = Some(Rc::downgrade(parent_ref));
+            child_node.id
+        };
+
+        if let Some(old_child) = map.insert(child_id, Rc::clone(&child_ref)) {
+            if !Rc::ptr_eq(&old_child, &child_ref) {
+                old_child.borrow_mut().parent = None;
+            }
         }
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
+
+        Ok(child_ref)
+    }
+
+    /// Save this node and its entire subtree directly to `path`.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), TreeError> {
+        save_to_file(path, |writer| {
+            write_header(writer)?;
+            serialize_node_internal(self, writer, 0)
+        })
     }
 
     /// Load a tree from a file at `path` and return its root node
@@ -164,7 +182,7 @@ impl Node {
 
     /// Write this node and its subtree without file headers
     pub fn write_subtree<W: Write>(&self, writer: &mut W) -> Result<(), TreeError> {
-        serialize_node_internal(self, writer)
+        serialize_node_internal(self, writer, 0)
     }
 
     /// Load a subtree from a stream without file headers
@@ -172,19 +190,51 @@ impl Node {
         reader: &mut R,
         parent: Option<&NodeRef>,
     ) -> Result<NodeRef, TreeError> {
-        deserialize_node(reader, parent)
+        deserialize_node(reader, parent, 0)
     }
 }
 
-pub fn get_or_insert_child(parent_ref: &NodeRef, id: [u8; 16]) -> Result<NodeRef, ()> {
-    let mut parent = parent_ref.borrow_mut();
-    match &parent.children {
-        Children::Attributes(map) | Children::Files(map) => match map.get(&id) {
-            Some(node) => Ok(Rc::clone(node)),
-            None => parent.insert(parent_ref, ChildType::ID(id)),
-        },
-        Children::None => Err(()),
+/// Look up a child by `id` under `parent_ref`, or insert a new node with `children_type`.
+pub fn get_or_insert_child(
+    parent_ref: &NodeRef,
+    id: [u8; 16],
+    children_type: ChildrenType,
+) -> Result<NodeRef, ()> {
+    {
+        let parent = parent_ref.borrow();
+        match &parent.children {
+            Children::Attributes(map) | Children::Files(map) => {
+                if let Some(node) = map.get(&id) {
+                    return Ok(Rc::clone(node));
+                }
+            }
+            Children::None => return Err(()),
+        }
     }
+    Node::insert(parent_ref, ChildType::Ref(Node::new(id, children_type)))
+}
+
+fn save_to_file<P, F>(path: P, write_fn: F) -> Result<(), TreeError>
+where
+    P: AsRef<Path>,
+    F: FnOnce(&mut BufWriter<File>) -> Result<(), TreeError>,
+{
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    // Write directly to the target path without temp files or rename.
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    write_fn(&mut writer)?;
+    writer.flush()?;
+    writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?
+        .sync_all()?;
+    Ok(())
 }
 
 // ============================================================================
@@ -200,7 +250,7 @@ impl Tree {
     /// Create a new tree with a given root ID
     pub fn new(root_id: [u8; 16]) -> Self {
         Self {
-            root: Node::new(root_id),
+            root: Node::new(root_id, ChildrenType::Attributes),
         }
     }
 
@@ -209,28 +259,9 @@ impl Tree {
         Self { root }
     }
 
-    /// Save the entire tree to a file at `path` atomically using a temporary file
+    /// Save the entire tree directly to `path`.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), TreeError> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let tmp_file_name = format!(
-            ".{}.tmp.{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        );
-        let tmp_path = path.with_file_name(tmp_file_name);
-        {
-            let file = File::create(&tmp_path)?;
-            let mut writer = BufWriter::new(file);
-            self.write_to(&mut writer)?;
-            writer.flush()?;
-        }
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
+        save_to_file(path, |writer| self.write_to(writer))
     }
 
     /// Load a tree from a file at `path`
@@ -243,14 +274,27 @@ impl Tree {
     /// Write binary tree data to any Write stream
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), TreeError> {
         write_header(writer)?;
-        serialize_node(&self.root, writer)?;
+        serialize_node(&self.root, writer, 0)?;
         Ok(())
     }
 
     /// Read binary tree data from any Read stream
     pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, TreeError> {
         read_header(reader)?;
-        let root = deserialize_node(reader, None)?;
+        let root = deserialize_node(reader, None, 0)?;
+        let mut trailing = [0u8; 1];
+        loop {
+            match reader.read(&mut trailing) {
+                Ok(0) => break,
+                Ok(_) => {
+                    return Err(TreeError::CorruptedData(
+                        "unexpected trailing bytes after tree data".to_string(),
+                    ));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(Self { root })
     }
 }
@@ -299,6 +343,7 @@ impl From<std::io::Error> for TreeError {
 
 pub const TREE_MAGIC: &[u8; 8] = b"GMEDTR01";
 pub const TREE_VERSION: u32 = 1;
+const MAX_TREE_DEPTH: usize = 128;
 
 fn write_header<W: Write>(writer: &mut W) -> Result<(), TreeError> {
     writer.write_all(TREE_MAGIC)?;
@@ -323,6 +368,7 @@ fn read_header<R: Read>(reader: &mut R) -> Result<(), TreeError> {
     Ok(())
 }
 
+// Pre-1970 timestamps clamp to UNIX_EPOCH (0, 0).
 fn system_time_to_secs_nanos(time: SystemTime) -> (u64, u32) {
     match time.duration_since(UNIX_EPOCH) {
         Ok(dur) => (dur.as_secs(), dur.subsec_nanos()),
@@ -330,8 +376,21 @@ fn system_time_to_secs_nanos(time: SystemTime) -> (u64, u32) {
     }
 }
 
-fn secs_nanos_to_system_time(secs: u64, nanos: u32) -> SystemTime {
-    UNIX_EPOCH + Duration::new(secs, nanos)
+fn secs_nanos_to_system_time(secs: u64, nanos: u32) -> Result<SystemTime, TreeError> {
+    if nanos >= 1_000_000_000 {
+        return Err(TreeError::CorruptedData(format!(
+            "invalid timestamp nanoseconds: {}",
+            nanos
+        )));
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::new(secs, nanos))
+        .ok_or_else(|| {
+            TreeError::CorruptedData(format!(
+                "timestamp out of range: secs={}, nanos={}",
+                secs, nanos
+            ))
+        })
 }
 
 fn write_file_metadata<W: Write>(meta: &FileMetadata, writer: &mut W) -> std::io::Result<()> {
@@ -371,75 +430,174 @@ fn read_file_metadata<R: Read>(reader: &mut R) -> Result<FileMetadata, TreeError
     let m_nsec = u32::from_be_bytes(u32_buf);
 
     reader.read_exact(&mut u8_buf)?;
-    let size = if u8_buf[0] == 1 {
-        reader.read_exact(&mut u64_buf)?;
-        Some(u64::from_be_bytes(u64_buf))
-    } else {
-        None
+    let size = match u8_buf[0] {
+        0 => None,
+        1 => {
+            reader.read_exact(&mut u64_buf)?;
+            Some(u64::from_be_bytes(u64_buf))
+        }
+        other => {
+            return Err(TreeError::CorruptedData(format!(
+                "invalid size tag: {}",
+                other
+            )));
+        }
     };
 
     Ok(FileMetadata {
-        atime: secs_nanos_to_system_time(a_sec, a_nsec),
-        mtime: secs_nanos_to_system_time(m_sec, m_nsec),
+        atime: secs_nanos_to_system_time(a_sec, a_nsec)?,
+        mtime: secs_nanos_to_system_time(m_sec, m_nsec)?,
         size,
     })
 }
 
-fn write_string<W: Write>(s: &str, writer: &mut W) -> std::io::Result<()> {
-    let bytes = s.as_bytes();
-    let len = bytes.len() as u16;
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(bytes)?;
+const FLAG_VISITED: u8 = 1 << 0;
+const FLAG_VALID_CHILD_HASH: u8 = 1 << 1;
+const FLAG_VALID_SELF_HASH: u8 = 1 << 2;
+const FLAG_HAS_CHILD_HASH: u8 = 1 << 3;
+const FLAG_HAS_SELF_HASH: u8 = 1 << 4;
+const FLAG_HAS_META_HASH: u8 = 1 << 5;
+const FLAG_HAS_DRAFT_NODE_META: u8 = 1 << 6;
+const FLAG_HAS_DRAFT_META_META: u8 = 1 << 7;
+
+fn write_opt_hash<W: Write>(hash: &Option<Hash>, writer: &mut W) -> std::io::Result<()> {
+    if let Some(h) = hash {
+        writer.write_all(h.as_bytes())?;
+    }
     Ok(())
 }
 
-fn read_string<R: Read>(reader: &mut R) -> Result<String, TreeError> {
-    let mut len_buf = [0u8; 2];
-    reader.read_exact(&mut len_buf)?;
-    let len = u16::from_be_bytes(len_buf) as usize;
-    let mut str_buf = vec![0u8; len];
-    reader.read_exact(&mut str_buf)?;
-    String::from_utf8(str_buf)
-        .map_err(|e| TreeError::CorruptedData(format!("Invalid UTF-8 string: {}", e)))
+fn read_opt_hash<R: Read>(present: bool, reader: &mut R) -> Result<Option<Hash>, TreeError> {
+    if !present {
+        return Ok(None);
+    }
+    let mut buf = [0u8; 32];
+    reader.read_exact(&mut buf)?;
+    Ok(Some(Hash::from_bytes(buf)))
 }
 
-fn serialize_node<W: Write>(node_ref: &NodeRef, writer: &mut W) -> Result<(), TreeError> {
+fn write_opt_file_metadata<W: Write>(
+    meta: &Option<FileMetadata>,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    if let Some(m) = meta {
+        write_file_metadata(m, writer)?;
+    }
+    Ok(())
+}
+
+fn read_opt_file_metadata<R: Read>(
+    present: bool,
+    reader: &mut R,
+) -> Result<Option<FileMetadata>, TreeError> {
+    if present {
+        Ok(Some(read_file_metadata(reader)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_children_map<W: Write>(
+    disc: u8,
+    map: &BTreeMap<[u8; 16], NodeRef>,
+    writer: &mut W,
+    depth: usize,
+) -> Result<(), TreeError> {
+    writer.write_all(&[disc])?;
+    let count = u32::try_from(map.len()).map_err(|_| {
+        TreeError::CorruptedData(format!("children count exceeds u32::MAX: {}", map.len()))
+    })?;
+    writer.write_all(&count.to_be_bytes())?;
+    for child_ref in map.values() {
+        serialize_node(child_ref, writer, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn read_children_map<R: Read>(
+    reader: &mut R,
+    parent: &NodeRef,
+    depth: usize,
+) -> Result<BTreeMap<[u8; 16], NodeRef>, TreeError> {
+    let mut count_buf = [0u8; 4];
+    reader.read_exact(&mut count_buf)?;
+    let count = u32::from_be_bytes(count_buf) as usize;
+    let mut map = BTreeMap::new();
+    for _ in 0..count {
+        let child = deserialize_node(reader, Some(parent), depth + 1)?;
+        let child_id = child.borrow().id;
+        if map.insert(child_id, child).is_some() {
+            return Err(TreeError::CorruptedData(format!(
+                "duplicate child id in serialized node: {:02x?}",
+                child_id
+            )));
+        }
+    }
+    Ok(map)
+}
+
+fn serialize_node<W: Write>(
+    node_ref: &NodeRef,
+    writer: &mut W,
+    depth: usize,
+) -> Result<(), TreeError> {
     let node = node_ref.borrow();
-    serialize_node_internal(&node, writer)
+    serialize_node_internal(&node, writer, depth)
 }
 
-fn serialize_node_internal<W: Write>(node: &Node, writer: &mut W) -> Result<(), TreeError> {
+fn serialize_node_internal<W: Write>(
+    node: &Node,
+    writer: &mut W,
+    depth: usize,
+) -> Result<(), TreeError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(TreeError::CorruptedData(format!(
+            "tree depth exceeds maximum of {}",
+            MAX_TREE_DEPTH
+        )));
+    }
+
     // 1. Write id (16 bytes)
     writer.write_all(&node.id)?;
 
     // 2. Write flags (1 byte)
     let mut flags = 0u8;
     if node.visited {
-        flags |= 1 << 0;
+        flags |= FLAG_VISITED;
     }
     if node.valid_child_hash {
-        flags |= 1 << 1;
+        flags |= FLAG_VALID_CHILD_HASH;
     }
     if node.valid_self_hash {
-        flags |= 1 << 2;
+        flags |= FLAG_VALID_SELF_HASH;
     }
     if node.child_hash.is_some() {
-        flags |= 1 << 3;
+        flags |= FLAG_HAS_CHILD_HASH;
+    }
+    if node.self_hash.is_some() {
+        flags |= FLAG_HAS_SELF_HASH;
+    }
+    if node.meta_hash.is_some() {
+        flags |= FLAG_HAS_META_HASH;
+    }
+    if node.draft_node_metadata.is_some() {
+        flags |= FLAG_HAS_DRAFT_NODE_META;
+    }
+    if node.draft_meta_metadata.is_some() {
+        flags |= FLAG_HAS_DRAFT_META_META;
     }
     writer.write_all(&[flags])?;
 
     // 3. Write hashes
-    write_string(&node.self_hash, writer)?;
-    write_string(&node.meta_hash, writer)?;
-    if let Some(ref ch) = node.child_hash {
-        write_string(ch, writer)?;
-    }
+    write_opt_hash(&node.self_hash, writer)?;
+    write_opt_hash(&node.meta_hash, writer)?;
+    write_opt_hash(&node.child_hash, writer)?;
 
     // 4. Write metadata blocks
     write_file_metadata(&node.node_metadata, writer)?;
     write_file_metadata(&node.meta_metadata, writer)?;
-    write_file_metadata(&node.draft_node_metadata, writer)?;
-    write_file_metadata(&node.draft_meta_metadata, writer)?;
+    write_opt_file_metadata(&node.draft_node_metadata, writer)?;
+    write_opt_file_metadata(&node.draft_meta_metadata, writer)?;
 
     // 5. Write children
     match &node.children {
@@ -447,20 +605,10 @@ fn serialize_node_internal<W: Write>(node: &Node, writer: &mut W) -> Result<(), 
             writer.write_all(&[0u8])?;
         }
         Children::Attributes(map) => {
-            writer.write_all(&[1u8])?;
-            let count = map.len() as u32;
-            writer.write_all(&count.to_be_bytes())?;
-            for (_child_id, child_ref) in map {
-                serialize_node(child_ref, writer)?;
-            }
+            write_children_map(1u8, map, writer, depth)?;
         }
         Children::Files(map) => {
-            writer.write_all(&[2u8])?;
-            let count = map.len() as u32;
-            writer.write_all(&count.to_be_bytes())?;
-            for (_child_id, child_ref) in map {
-                serialize_node(child_ref, writer)?;
-            }
+            write_children_map(2u8, map, writer, depth)?;
         }
     }
 
@@ -470,7 +618,15 @@ fn serialize_node_internal<W: Write>(node: &Node, writer: &mut W) -> Result<(), 
 fn deserialize_node<R: Read>(
     reader: &mut R,
     parent: Option<&NodeRef>,
+    depth: usize,
 ) -> Result<NodeRef, TreeError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(TreeError::CorruptedData(format!(
+            "tree depth exceeds maximum of {}",
+            MAX_TREE_DEPTH
+        )));
+    }
+
     // 1. Read id
     let mut id = [0u8; 16];
     reader.read_exact(&mut id)?;
@@ -479,28 +635,28 @@ fn deserialize_node<R: Read>(
     let mut flags_buf = [0u8; 1];
     reader.read_exact(&mut flags_buf)?;
     let flags = flags_buf[0];
-    let visited = (flags & (1 << 0)) != 0;
-    let valid_child_hash = (flags & (1 << 1)) != 0;
-    let valid_self_hash = (flags & (1 << 2)) != 0;
-    let has_child_hash = (flags & (1 << 3)) != 0;
+    let visited = (flags & FLAG_VISITED) != 0;
+    let valid_child_hash = (flags & FLAG_VALID_CHILD_HASH) != 0;
+    let valid_self_hash = (flags & FLAG_VALID_SELF_HASH) != 0;
+    let has_child_hash = (flags & FLAG_HAS_CHILD_HASH) != 0;
+    let has_self_hash = (flags & FLAG_HAS_SELF_HASH) != 0;
+    let has_meta_hash = (flags & FLAG_HAS_META_HASH) != 0;
+    let has_draft_node_meta = (flags & FLAG_HAS_DRAFT_NODE_META) != 0;
+    let has_draft_meta_meta = (flags & FLAG_HAS_DRAFT_META_META) != 0;
 
     // 3. Read hashes
-    let self_hash = read_string(reader)?;
-    let meta_hash = read_string(reader)?;
-    let child_hash = if has_child_hash {
-        Some(read_string(reader)?)
-    } else {
-        None
-    };
+    let self_hash = read_opt_hash(has_self_hash, reader)?;
+    let meta_hash = read_opt_hash(has_meta_hash, reader)?;
+    let child_hash = read_opt_hash(has_child_hash, reader)?;
 
     // 4. Read metadata blocks
     let node_metadata = read_file_metadata(reader)?;
     let meta_metadata = read_file_metadata(reader)?;
-    let draft_node_metadata = read_file_metadata(reader)?;
-    let draft_meta_metadata = read_file_metadata(reader)?;
+    let draft_node_metadata = read_opt_file_metadata(has_draft_node_meta, reader)?;
+    let draft_meta_metadata = read_opt_file_metadata(has_draft_meta_meta, reader)?;
 
     // Create current node
-    let node_ref = Node::new(id);
+    let node_ref = Node::new(id, ChildrenType::None);
     if let Some(p) = parent {
         node_ref.borrow_mut().parent = Some(Rc::downgrade(p));
     }
@@ -510,30 +666,8 @@ fn deserialize_node<R: Read>(
     reader.read_exact(&mut disc_buf)?;
     let children = match disc_buf[0] {
         0 => Children::None,
-        1 => {
-            let mut count_buf = [0u8; 4];
-            reader.read_exact(&mut count_buf)?;
-            let count = u32::from_be_bytes(count_buf) as usize;
-            let mut map = BTreeMap::new();
-            for _ in 0..count {
-                let child = deserialize_node(reader, Some(&node_ref))?;
-                let child_id = child.borrow().id;
-                map.insert(child_id, child);
-            }
-            Children::Attributes(map)
-        }
-        2 => {
-            let mut count_buf = [0u8; 4];
-            reader.read_exact(&mut count_buf)?;
-            let count = u32::from_be_bytes(count_buf) as usize;
-            let mut map = BTreeMap::new();
-            for _ in 0..count {
-                let child = deserialize_node(reader, Some(&node_ref))?;
-                let child_id = child.borrow().id;
-                map.insert(child_id, child);
-            }
-            Children::Files(map)
-        }
+        1 => Children::Attributes(read_children_map(reader, &node_ref, depth)?),
+        2 => Children::Files(read_children_map(reader, &node_ref, depth)?),
         other => {
             return Err(TreeError::CorruptedData(format!(
                 "Invalid children discriminant: {}",
@@ -563,19 +697,93 @@ fn deserialize_node<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestTempDir {
+        path: PathBuf,
+    }
+
+    impl TestTempDir {
+        fn new(prefix: &str) -> Self {
+            let seq = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "git_med_{}_{}_{}",
+                prefix,
+                std::process::id(),
+                seq
+            ));
+            Self { path }
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
-    fn test_single_node_save_and_load_roundtrip() {
+    fn test_node_new_defaults_and_tree_new() {
+        let node = Node::new([3u8; 16], ChildrenType::None);
+        {
+            let n = node.borrow();
+            assert!(!n.visited);
+            assert!(!n.valid_child_hash);
+            assert!(!n.valid_self_hash);
+            assert!(n.self_hash.is_none());
+            assert!(n.meta_hash.is_none());
+            assert!(n.child_hash.is_none());
+            assert!(n.draft_node_metadata.is_none());
+            assert!(n.draft_meta_metadata.is_none());
+            assert_eq!(n.node_metadata.atime, UNIX_EPOCH);
+            assert_eq!(n.node_metadata.mtime, UNIX_EPOCH);
+            assert_eq!(n.node_metadata.size, None);
+            assert_eq!(n.meta_metadata.atime, UNIX_EPOCH);
+            assert_eq!(n.meta_metadata.mtime, UNIX_EPOCH);
+            assert_eq!(n.meta_metadata.size, None);
+            assert!(n.parent().is_none());
+            assert!(matches!(n.children, Children::None));
+        }
+
+        let files_node = Node::new([5u8; 16], ChildrenType::Files);
+        assert!(matches!(files_node.borrow().children, Children::Files(ref m) if m.is_empty()));
+
+        let tree = Tree::new([4u8; 16]);
+        let root = tree.root.borrow();
+        assert_eq!(root.id, [4u8; 16]);
+        assert!(matches!(root.children, Children::Attributes(ref m) if m.is_empty()));
+    }
+
+    #[test]
+    fn test_single_node_stream_roundtrip() {
         let node_id = [1u8; 16];
-        let node = Node::new(node_id);
+        let self_hash = blake3::hash(b"self_hash_123");
+        let meta_hash = blake3::hash(b"meta_hash_456");
+        let child_hash = blake3::hash(b"child_hash_789");
+
+        let node = Node::new(node_id, ChildrenType::None);
         {
             let mut n = node.borrow_mut();
-            n.self_hash = "self_hash_123".to_string();
-            n.meta_hash = "meta_hash_456".to_string();
-            n.child_hash = Some("child_hash_789".to_string());
+            n.self_hash = Some(self_hash);
+            n.meta_hash = Some(meta_hash);
+            n.child_hash = Some(child_hash);
             n.visited = true;
+            n.valid_child_hash = true;
             n.valid_self_hash = false;
             n.node_metadata.size = Some(4096);
+            n.meta_metadata.size = Some(128);
+            n.draft_node_metadata = Some(NodeMetadata {
+                size: Some(8192),
+                ..NodeMetadata::default()
+            });
+            n.draft_meta_metadata = Some(NodeMetadata {
+                size: Some(256),
+                ..NodeMetadata::default()
+            });
         }
 
         let mut buffer = Vec::new();
@@ -586,33 +794,45 @@ mod tests {
         let loaded_node = loaded_tree.root.borrow();
 
         assert_eq!(loaded_node.id, node_id);
-        assert_eq!(loaded_node.self_hash, "self_hash_123");
-        assert_eq!(loaded_node.meta_hash, "meta_hash_456");
-        assert_eq!(loaded_node.child_hash.as_deref(), Some("child_hash_789"));
+        assert_eq!(loaded_node.self_hash, Some(self_hash));
+        assert_eq!(loaded_node.meta_hash, Some(meta_hash));
+        assert_eq!(loaded_node.child_hash, Some(child_hash));
         assert!(loaded_node.visited);
+        assert!(loaded_node.valid_child_hash);
         assert!(!loaded_node.valid_self_hash);
         assert_eq!(loaded_node.node_metadata.size, Some(4096));
+        assert_eq!(loaded_node.meta_metadata.size, Some(128));
+        assert_eq!(
+            loaded_node
+                .draft_node_metadata
+                .as_ref()
+                .expect("draft_node_metadata missing")
+                .size,
+            Some(8192)
+        );
+        assert_eq!(
+            loaded_node
+                .draft_meta_metadata
+                .as_ref()
+                .expect("draft_meta_metadata missing")
+                .size,
+            Some(256)
+        );
         assert!(matches!(loaded_node.children, Children::None));
         assert!(loaded_node.parent.is_none());
     }
 
     #[test]
     fn test_tree_hierarchy_and_parent_reconstruction() {
-        let root = Node::new([0u8; 16]);
-        root.borrow_mut().children = Children::Attributes(BTreeMap::new());
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
 
         let task_id = [10u8; 16];
-        let task_node = root
-            .borrow_mut()
-            .insert(&root, ChildType::ID(task_id))
-            .expect("Failed to insert task");
+        let task_node = Node::insert(&root, ChildType::Id(task_id)).expect("Failed to insert task");
         task_node.borrow_mut().children = Children::Files(BTreeMap::new());
 
         let file_id = [20u8; 16];
-        let _file_node = task_node
-            .borrow_mut()
-            .insert(&task_node, ChildType::ID(file_id))
-            .expect("Failed to insert file");
+        let _file_node =
+            Node::insert(&task_node, ChildType::Id(file_id)).expect("Failed to insert file");
 
         let tree = Tree::from_root(Rc::clone(&root));
         let mut buffer = Vec::new();
@@ -629,7 +849,6 @@ mod tests {
             _ => panic!("Expected Children::Attributes on root"),
         };
 
-        // Verify parent link from task to root
         let task_parent = restored_task.borrow().parent().expect("task has no parent");
         assert_eq!(task_parent.borrow().id, [0u8; 16]);
 
@@ -638,30 +857,557 @@ mod tests {
             _ => panic!("Expected Children::Files on task"),
         };
 
-        // Verify parent link from file to task
         let file_parent = restored_file.borrow().parent().expect("file has no parent");
         assert_eq!(file_parent.borrow().id, task_id);
+        assert!(matches!(restored_file.borrow().children, Children::None));
     }
 
     #[test]
-    fn test_file_save_and_load() {
-        let root = Node::new([99u8; 16]);
-        let temp_dir = std::env::temp_dir().join(format!("git_med_test_{}", std::process::id()));
-        let file_path = temp_dir.join("test_tree.bin");
+    fn test_file_save_load_and_direct_overwrite() {
+        let temp_dir = TestTempDir::new("tree_file");
+        let nested_dir = temp_dir.path.join("nested");
+        let file_path = nested_dir.join("test_tree.bin");
+
+        let root = Node::new([99u8; 16], ChildrenType::Attributes);
+        Node::insert(&root, ChildType::Id([1u8; 16])).unwrap();
+        Node::insert(&root, ChildType::Id([2u8; 16])).unwrap();
 
         let tree = Tree::from_root(root);
         tree.save(&file_path).expect("Failed to save tree to file");
+        let first_len = std::fs::metadata(&file_path).unwrap().len();
 
         let loaded = Tree::load(&file_path).expect("Failed to load tree from file");
         assert_eq!(loaded.root.borrow().id, [99u8; 16]);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // Overwrite with a smaller tree directly and confirm truncation + no temp files.
+        let smaller = Tree::from_root(Node::new([77u8; 16], ChildrenType::None));
+        smaller.save(&file_path).expect("Failed to overwrite tree");
+        let second_len = std::fs::metadata(&file_path).unwrap().len();
+        assert!(second_len < first_len);
+
+        let reloaded = Tree::load(&file_path).expect("Failed to reload overwritten tree");
+        assert_eq!(reloaded.root.borrow().id, [77u8; 16]);
+        assert!(matches!(reloaded.root.borrow().children, Children::None));
+
+        let entries: Vec<_> = std::fs::read_dir(&nested_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("test_tree.bin")]);
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_io_error() {
+        let temp_dir = TestTempDir::new("missing");
+        let missing = temp_dir.path.join("does_not_exist.bin");
+        assert!(matches!(Tree::load(&missing), Err(TreeError::Io(_))));
+        assert!(matches!(Node::load(&missing), Err(TreeError::Io(_))));
     }
 
     #[test]
     fn test_invalid_magic() {
         let invalid_data = b"NOTVALID";
-        let result = Tree::read_from(&mut &invalid_data[..]);
-        assert!(matches!(result, Err(TreeError::InvalidMagic)));
+        assert!(matches!(
+            Tree::read_from(&mut &invalid_data[..]),
+            Err(TreeError::InvalidMagic)
+        ));
+
+        let mut wrong_magic_with_version = b"BADMAGIC".to_vec();
+        wrong_magic_with_version.extend_from_slice(&TREE_VERSION.to_be_bytes());
+        assert!(matches!(
+            Tree::read_from(&mut &wrong_magic_with_version[..]),
+            Err(TreeError::InvalidMagic)
+        ));
+
+        let short_magic = b"GMED";
+        assert!(matches!(
+            Tree::read_from(&mut &short_magic[..]),
+            Err(TreeError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn test_metadata_timestamp_roundtrip() {
+        let node = Node::new([5u8; 16], ChildrenType::None);
+        let test_time = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        {
+            let mut n = node.borrow_mut();
+            n.node_metadata.atime = test_time;
+            n.node_metadata.mtime = test_time;
+            n.meta_metadata.atime = UNIX_EPOCH + Duration::new(1, 0);
+            n.meta_metadata.mtime = UNIX_EPOCH + Duration::new(2, 999_999_999);
+            n.meta_metadata.size = Some(42);
+            n.draft_node_metadata = Some(NodeMetadata {
+                atime: UNIX_EPOCH + Duration::new(100, 500),
+                size: Some(10),
+                ..NodeMetadata::default()
+            });
+            n.draft_meta_metadata = Some(NodeMetadata {
+                mtime: UNIX_EPOCH + Duration::new(999, 0),
+                size: Some(20),
+                ..NodeMetadata::default()
+            });
+        }
+
+        let mut buf = Vec::new();
+        Tree::from_root(Rc::clone(&node))
+            .write_to(&mut buf)
+            .unwrap();
+        let loaded = Tree::read_from(&mut &buf[..]).unwrap();
+        let l = loaded.root.borrow();
+
+        assert_eq!(l.node_metadata.atime, test_time);
+        assert_eq!(l.node_metadata.mtime, test_time);
+        assert_eq!(l.meta_metadata.atime, UNIX_EPOCH + Duration::new(1, 0));
+        assert_eq!(
+            l.meta_metadata.mtime,
+            UNIX_EPOCH + Duration::new(2, 999_999_999)
+        );
+        assert_eq!(l.meta_metadata.size, Some(42));
+        assert_eq!(
+            l.draft_node_metadata
+                .as_ref()
+                .expect("draft_node_metadata missing")
+                .atime,
+            UNIX_EPOCH + Duration::new(100, 500)
+        );
+        assert_eq!(l.draft_node_metadata.as_ref().unwrap().size, Some(10));
+        assert_eq!(
+            l.draft_meta_metadata
+                .as_ref()
+                .expect("draft_meta_metadata missing")
+                .mtime,
+            UNIX_EPOCH + Duration::new(999, 0)
+        );
+        assert_eq!(l.draft_meta_metadata.as_ref().unwrap().size, Some(20));
+
+        if let Some(pre_epoch) = UNIX_EPOCH.checked_sub(Duration::from_secs(10)) {
+            let pre_node = Node::new([6u8; 16], ChildrenType::None);
+            pre_node.borrow_mut().node_metadata.atime = pre_epoch;
+            let mut pre_buf = Vec::new();
+            Tree::from_root(pre_node).write_to(&mut pre_buf).unwrap();
+            let pre_loaded = Tree::read_from(&mut &pre_buf[..]).unwrap();
+            assert_eq!(pre_loaded.root.borrow().node_metadata.atime, UNIX_EPOCH);
+        }
+    }
+
+    #[test]
+    fn test_child_hash_none_and_flags_roundtrip() {
+        let node = Node::new([6u8; 16], ChildrenType::None);
+        {
+            let mut n = node.borrow_mut();
+            n.child_hash = None;
+            n.valid_child_hash = false;
+            n.valid_self_hash = true;
+            n.visited = false;
+        }
+
+        let mut buf = Vec::new();
+        Tree::from_root(Rc::clone(&node))
+            .write_to(&mut buf)
+            .unwrap();
+        let loaded = Tree::read_from(&mut &buf[..]).unwrap();
+        let l = loaded.root.borrow();
+
+        assert!(l.self_hash.is_none());
+        assert!(l.meta_hash.is_none());
+        assert!(l.child_hash.is_none());
+        assert!(l.draft_node_metadata.is_none());
+        assert!(l.draft_meta_metadata.is_none());
+        assert!(!l.valid_child_hash);
+        assert!(l.valid_self_hash);
+        assert!(!l.visited);
+    }
+
+    #[test]
+    fn test_empty_attributes_and_files_roundtrip() {
+        let attr_node = Node::new([7u8; 16], ChildrenType::Attributes);
+        let mut attr_buf = Vec::new();
+        Tree::from_root(attr_node).write_to(&mut attr_buf).unwrap();
+        let loaded_attr = Tree::read_from(&mut &attr_buf[..]).unwrap();
+        assert!(matches!(
+            &loaded_attr.root.borrow().children,
+            Children::Attributes(map) if map.is_empty()
+        ));
+
+        let files_node = Node::new([8u8; 16], ChildrenType::Files);
+        let mut files_buf = Vec::new();
+        Tree::from_root(files_node)
+            .write_to(&mut files_buf)
+            .unwrap();
+        let loaded_files = Tree::read_from(&mut &files_buf[..]).unwrap();
+        assert!(matches!(
+            &loaded_files.root.borrow().children,
+            Children::Files(map) if map.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_multiple_siblings_ordering() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+
+        let unsorted_ids: Vec<[u8; 16]> = [5u8, 1, 3, 2, 4].into_iter().map(|i| [i; 16]).collect();
+        for id in &unsorted_ids {
+            Node::insert(&root, ChildType::Id(*id)).unwrap();
+        }
+        let expected_sorted: Vec<[u8; 16]> = (1u8..=5).map(|i| [i; 16]).collect();
+
+        let mut buf = Vec::new();
+        Tree::from_root(Rc::clone(&root))
+            .write_to(&mut buf)
+            .unwrap();
+        let loaded = Tree::read_from(&mut &buf[..]).unwrap();
+
+        match &loaded.root.borrow().children {
+            Children::Attributes(map) => {
+                let loaded_ids: Vec<[u8; 16]> = map.keys().cloned().collect();
+                assert_eq!(loaded_ids, expected_sorted);
+            }
+            _ => panic!("Expected Attributes"),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_version() {
+        for version in [0u32, 99u32] {
+            let mut data = Vec::new();
+            data.extend_from_slice(TREE_MAGIC);
+            data.extend_from_slice(&version.to_be_bytes());
+            let result = Tree::read_from(&mut &data[..]);
+            assert!(matches!(
+                result,
+                Err(TreeError::UnsupportedVersion(v)) if v == version
+            ));
+        }
+    }
+
+    #[test]
+    fn test_truncated_file() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let child = Node::insert(&root, ChildType::Id([1u8; 16])).unwrap();
+        child.borrow_mut().self_hash = Some(blake3::hash(b"child"));
+
+        let mut buf = Vec::new();
+        Tree::from_root(root).write_to(&mut buf).unwrap();
+
+        for len in 0..buf.len() {
+            let result = Tree::read_from(&mut &buf[..len]);
+            assert!(
+                matches!(result, Err(TreeError::Io(_))),
+                "expected Io error at truncation length {}",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_trailing_bytes_rejected_by_tree_read_from() {
+        let node = Node::new([0u8; 16], ChildrenType::None);
+        let mut buf = Vec::new();
+        Tree::from_root(node).write_to(&mut buf).unwrap();
+        buf.push(0x00);
+
+        let result = Tree::read_from(&mut &buf[..]);
+        assert!(matches!(result, Err(TreeError::CorruptedData(_))));
+    }
+
+    #[test]
+    fn test_invalid_children_discriminant() {
+        let node = Node::new([0u8; 16], ChildrenType::None);
+        let mut buf = Vec::new();
+        Tree::from_root(node).write_to(&mut buf).unwrap();
+
+        let last = buf.len() - 1;
+        assert_eq!(buf[last], 0u8);
+        buf[last] = 0xFF;
+
+        let result = Tree::read_from(&mut &buf[..]);
+        assert!(matches!(result, Err(TreeError::CorruptedData(_))));
+    }
+
+    #[test]
+    fn test_invalid_size_tag() {
+        let node = Node::new([0u8; 16], ChildrenType::None);
+        let mut buf = Vec::new();
+        Tree::from_root(node).write_to(&mut buf).unwrap();
+
+        // 12 (header) + 16 (id) + 1 (flags) + 24 (node_metadata atime+mtime)
+        let size_tag_offset = 12 + 16 + 1 + 24;
+        assert_eq!(buf[size_tag_offset], 0u8);
+        buf[size_tag_offset] = 0x05;
+
+        let result = Tree::read_from(&mut &buf[..]);
+        assert!(matches!(result, Err(TreeError::CorruptedData(_))));
+    }
+
+    #[test]
+    fn test_invalid_and_overflow_timestamps() {
+        let node = Node::new([0u8; 16], ChildrenType::None);
+        let mut base_buf = Vec::new();
+        Tree::from_root(node).write_to(&mut base_buf).unwrap();
+
+        // 12 (header) + 16 (id) + 1 (flags) = start of node_metadata.atime (secs: 8, nanos: 4)
+        let atime_secs_offset = 12 + 16 + 1;
+        let atime_nanos_offset = atime_secs_offset + 8;
+
+        let mut bad_nanos = base_buf.clone();
+        bad_nanos[atime_nanos_offset..atime_nanos_offset + 4]
+            .copy_from_slice(&1_000_000_000u32.to_be_bytes());
+        assert!(matches!(
+            Tree::read_from(&mut &bad_nanos[..]),
+            Err(TreeError::CorruptedData(_))
+        ));
+
+        let mut overflow_secs = base_buf;
+        overflow_secs[atime_secs_offset..atime_secs_offset + 8]
+            .copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(
+            Tree::read_from(&mut &overflow_secs[..]),
+            Err(TreeError::CorruptedData(_))
+        ));
+    }
+
+    #[test]
+    fn test_duplicate_child_id_in_stream_rejected() {
+        let child_id = [42u8; 16];
+        let child = Node::new(child_id, ChildrenType::None);
+        let mut child_bytes = Vec::new();
+        child.borrow().write_subtree(&mut child_bytes).unwrap();
+
+        let mut stream = Vec::new();
+        stream.extend_from_slice(TREE_MAGIC);
+        stream.extend_from_slice(&TREE_VERSION.to_be_bytes());
+        // Root node: id + flags + two empty FileMetadata (25 bytes each) + disc(1) + count(2)
+        stream.extend_from_slice(&[0u8; 16]);
+        stream.push(0u8);
+        write_file_metadata(&NodeMetadata::default(), &mut stream).unwrap();
+        write_file_metadata(&NodeMetadata::default(), &mut stream).unwrap();
+        stream.push(1u8);
+        stream.extend_from_slice(&2u32.to_be_bytes());
+        stream.extend_from_slice(&child_bytes);
+        stream.extend_from_slice(&child_bytes);
+
+        let result = Tree::read_from(&mut &stream[..]);
+        assert!(matches!(result, Err(TreeError::CorruptedData(_))));
+    }
+
+    #[test]
+    fn test_excessive_tree_depth_rejected() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let mut current = Rc::clone(&root);
+        for d in 1..=(MAX_TREE_DEPTH + 1) {
+            let next = Node::new([d as u8; 16], ChildrenType::Attributes);
+            Node::insert(&current, ChildType::Ref(Rc::clone(&next))).unwrap();
+            current = next;
+        }
+
+        let mut buf = Vec::new();
+        let ser_res = Tree::from_root(root).write_to(&mut buf);
+        assert!(matches!(ser_res, Err(TreeError::CorruptedData(_))));
+
+        // Craft a raw serialized stream nested MAX_TREE_DEPTH + 2 levels deep.
+        let mut deep_stream = Vec::new();
+        deep_stream.extend_from_slice(TREE_MAGIC);
+        deep_stream.extend_from_slice(&TREE_VERSION.to_be_bytes());
+        for d in 0..=(MAX_TREE_DEPTH + 1) {
+            deep_stream.extend_from_slice(&[d as u8; 16]);
+            deep_stream.push(0u8);
+            write_file_metadata(&NodeMetadata::default(), &mut deep_stream).unwrap();
+            write_file_metadata(&NodeMetadata::default(), &mut deep_stream).unwrap();
+            if d <= MAX_TREE_DEPTH {
+                deep_stream.push(1u8);
+                deep_stream.extend_from_slice(&1u32.to_be_bytes());
+            } else {
+                deep_stream.push(0u8);
+            }
+        }
+        let de_res = Tree::read_from(&mut &deep_stream[..]);
+        assert!(matches!(de_res, Err(TreeError::CorruptedData(_))));
+    }
+
+    #[test]
+    fn test_write_subtree_and_load_subtree() {
+        let node = Node::new([42u8; 16], ChildrenType::None);
+        let expected_hash = blake3::hash(b"subtree_hash");
+        node.borrow_mut().self_hash = Some(expected_hash);
+
+        let mut buf = Vec::new();
+        node.borrow().write_subtree(&mut buf).unwrap();
+
+        let loaded = Node::load_subtree(&mut &buf[..], None).unwrap();
+        assert_eq!(loaded.borrow().id, [42u8; 16]);
+        assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
+        assert!(loaded.borrow().parent().is_none());
+    }
+
+    #[test]
+    fn test_load_subtree_with_parent() {
+        let parent = Node::new([1u8; 16], ChildrenType::Attributes);
+        let child = Node::new([2u8; 16], ChildrenType::None);
+        let expected_hash = blake3::hash(b"child_hash");
+        child.borrow_mut().self_hash = Some(expected_hash);
+
+        let mut buf = Vec::new();
+        child.borrow().write_subtree(&mut buf).unwrap();
+
+        let loaded = Node::load_subtree(&mut &buf[..], Some(&parent)).unwrap();
+        assert_eq!(loaded.borrow().id, [2u8; 16]);
+        assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
+        let loaded_parent = loaded.borrow().parent().expect("should have parent");
+        assert_eq!(loaded_parent.borrow().id, [1u8; 16]);
+    }
+
+    #[test]
+    fn test_multi_node_subtree_and_sequential_stream() {
+        let sub1 = Node::new([10u8; 16], ChildrenType::Files);
+        Node::insert(&sub1, ChildType::Id([11u8; 16])).unwrap();
+
+        let sub2 = Node::new([20u8; 16], ChildrenType::None);
+
+        let mut stream = Vec::new();
+        sub1.borrow().write_subtree(&mut stream).unwrap();
+        sub2.borrow().write_subtree(&mut stream).unwrap();
+
+        let mut cursor = &stream[..];
+        let loaded1 = Node::load_subtree(&mut cursor, None).unwrap();
+        let loaded2 = Node::load_subtree(&mut cursor, None).unwrap();
+        assert!(cursor.is_empty());
+
+        match &loaded1.borrow().children {
+            Children::Files(map) => {
+                let child = map.get(&[11u8; 16]).expect("missing subtree child");
+                assert_eq!(child.borrow().parent().unwrap().borrow().id, [10u8; 16]);
+            }
+            _ => panic!("Expected Children::Files"),
+        }
+        assert_eq!(loaded2.borrow().id, [20u8; 16]);
+    }
+
+    #[test]
+    fn test_node_save_and_load() {
+        let temp_dir = TestTempDir::new("node_file");
+        let file_path = temp_dir.path.join("node_tree.bin");
+
+        let node = Node::new([88u8; 16], ChildrenType::None);
+        let expected_hash = blake3::hash(b"node_save_test");
+        node.borrow_mut().self_hash = Some(expected_hash);
+
+        node.borrow().save(&file_path).expect("Node::save failed");
+        let loaded = Node::load(&file_path).expect("Node::load failed");
+        assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
+
+        // Direct overwrite on the same path.
+        let replacement = Node::new([89u8; 16], ChildrenType::None);
+        replacement
+            .borrow()
+            .save(&file_path)
+            .expect("Node::save overwrite failed");
+        let reloaded = Node::load(&file_path).expect("Node::load overwrite failed");
+        assert_eq!(reloaded.borrow().id, [89u8; 16]);
+        assert!(reloaded.borrow().self_hash.is_none());
+    }
+
+    #[test]
+    fn test_node_insert_ref_errors_and_replacement() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let parent = Node::new([1u8; 16], ChildrenType::Attributes);
+        let leaf = Node::new([2u8; 16], ChildrenType::None);
+
+        Node::insert(&root, ChildType::Ref(Rc::clone(&parent))).unwrap();
+        Node::insert(&parent, ChildType::Ref(Rc::clone(&leaf))).unwrap();
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+
+        // Inserting into Children::None must fail without mutating leaf's parent.
+        let other_leaf = Node::new([3u8; 16], ChildrenType::None);
+        assert!(Node::insert(&other_leaf, ChildType::Ref(Rc::clone(&leaf))).is_err());
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+
+        // Self-insertion and ancestor cycle insertion must fail without panicking.
+        assert!(Node::insert(&parent, ChildType::Ref(Rc::clone(&parent))).is_err());
+        assert!(Node::insert(&leaf, ChildType::Ref(Rc::clone(&root))).is_err());
+        assert!(Node::insert(&parent, ChildType::Ref(Rc::clone(&root))).is_err());
+
+        // Re-inserting the same NodeRef keeps its parent intact.
+        Node::insert(&parent, ChildType::Ref(Rc::clone(&leaf))).unwrap();
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+
+        // Replacing with a new NodeRef of the same ID clears the displaced node's parent.
+        let replacement = Node::new([2u8; 16], ChildrenType::None);
+        Node::insert(&parent, ChildType::Ref(Rc::clone(&replacement))).unwrap();
+        assert!(leaf.borrow().parent().is_none());
+        assert_eq!(
+            replacement.borrow().parent().unwrap().borrow().id,
+            [1u8; 16]
+        );
+    }
+
+    #[test]
+    fn test_get_or_insert_child() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let child_id = [7u8; 16];
+
+        let created = get_or_insert_child(&root, child_id, ChildrenType::Files).unwrap();
+        assert!(matches!(created.borrow().children, Children::Files(_)));
+        assert_eq!(created.borrow().parent().unwrap().borrow().id, [0u8; 16]);
+        created.borrow_mut().visited = true;
+
+        let fetched = get_or_insert_child(&root, child_id, ChildrenType::None).unwrap();
+        assert!(Rc::ptr_eq(&created, &fetched));
+        assert!(fetched.borrow().visited);
+
+        let leaf = get_or_insert_child(&created, [8u8; 16], ChildrenType::None).unwrap();
+        assert!(get_or_insert_child(&leaf, [9u8; 16], ChildrenType::None).is_err());
+    }
+
+    #[test]
+    fn test_invalidate_ancestors_hash() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let task = get_or_insert_child(&root, [1u8; 16], ChildrenType::Attributes).unwrap();
+        let subject = get_or_insert_child(&task, [2u8; 16], ChildrenType::Files).unwrap();
+        let leaf = get_or_insert_child(&subject, [3u8; 16], ChildrenType::None).unwrap();
+        let sibling_task = get_or_insert_child(&root, [4u8; 16], ChildrenType::Files).unwrap();
+
+        for node in [&root, &task, &subject, &leaf, &sibling_task] {
+            let mut n = node.borrow_mut();
+            n.valid_child_hash = true;
+            n.valid_self_hash = true;
+        }
+
+        leaf.borrow().invalidate_ancestors_hash();
+
+        assert!(!root.borrow().valid_child_hash);
+        assert!(!task.borrow().valid_child_hash);
+        assert!(!subject.borrow().valid_child_hash);
+        assert!(leaf.borrow().valid_child_hash);
+        assert!(sibling_task.borrow().valid_child_hash);
+
+        for node in [&root, &task, &subject, &leaf, &sibling_task] {
+            assert!(node.borrow().valid_self_hash);
+        }
+
+        // Calling on root with no parent is a clean no-op.
+        root.borrow_mut().valid_child_hash = true;
+        root.borrow().invalidate_ancestors_hash();
+        assert!(root.borrow().valid_child_hash);
+    }
+
+    #[test]
+    fn test_tree_error_traits() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let tree_io: TreeError = io_err.into();
+        assert!(tree_io.source().is_some());
+        assert!(tree_io.to_string().contains("I/O error"));
+
+        let magic_err = TreeError::InvalidMagic;
+        assert!(magic_err.source().is_none());
+        assert!(magic_err.to_string().contains("magic"));
+
+        let ver_err = TreeError::UnsupportedVersion(7);
+        assert!(ver_err.source().is_none());
+        assert!(ver_err.to_string().contains('7'));
+
+        let corrupt_err = TreeError::CorruptedData("bad tag".to_string());
+        assert!(corrupt_err.source().is_none());
+        assert!(corrupt_err.to_string().contains("bad tag"));
     }
 }

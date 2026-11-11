@@ -7,32 +7,52 @@ pub mod utils;
 use std::path::Path;
 
 use crate::core::tree::NodeRef;
+use crate::files::types::FileMetadata;
+use crate::files::utils::get_file_metadata;
 use crate::views::brats::Brats;
 use crate::views::dicom::Dicom;
+use crate::views::qomra::Qomra;
 use crate::views::traits::View;
-use crate::views::types::FileMetadata;
 
 pub fn get_view(view: &str) -> Option<Box<dyn View>> {
     match view {
         "brats" => Some(Box::new(Brats::default())),
         "dicom" => Some(Box::new(Dicom::default())),
+        "qomra" => Some(Box::new(Qomra::default())),
         _ => None,
     }
 }
 
 pub fn should_hash(node: &NodeRef, filemetadata: &FileMetadata) -> bool {
-    if node.borrow().meta_metadata <= filemetadata || node.borrow().node_metadata <= filemetadata {
-        true
+    let node = node.borrow();
+    if node.meta_metadata <= *filemetadata || node.node_metadata <= *filemetadata {
+        return true;
     }
+
+    if node.node_metadata.size.is_some() {
+        return node.node_metadata.size != filemetadata.size;
+    }
+    if node.meta_metadata.size.is_some() {
+        return node.meta_metadata.size != filemetadata.size;
+    }
+
     false
 }
 
-pub fn index_root(view: &str, path: &Path, node: &NodeRef) -> Option<Box<dyn View>> {
-    get_view(view)
+pub fn index_root(view: &str, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    let file_metadata = get_file_metadata(path);
+    match should_hash(node, &file_metadata) {
+        true => {
+            let v = get_view(view).ok_or(())?;
+            v.index_root(path, node)
+        }
+        false => Ok(()),
+    }
 }
 
-pub fn index_task(view: &str, path: &Path, node: &NodeRef) -> Option<Box<dyn View>> {
-    get_view(view)
+pub fn index_task(view: &str, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_task(path, node)
 }
 
 pub fn index_source(
@@ -40,8 +60,9 @@ pub fn index_source(
     path: &Path,
     node: &NodeRef,
     task_id: &[u8; 16],
-) -> Option<Box<dyn View>> {
-    get_view(view)
+) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_source(path, node, task_id)
 }
 
 pub fn index_subject(
@@ -50,8 +71,9 @@ pub fn index_subject(
     node: &NodeRef,
     task_id: &[u8; 16],
     source_id: &[u8; 16],
-) -> Option<Box<dyn View>> {
-    get_view(view)
+) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_subject(path, node, task_id, source_id)
 }
 
 pub fn index_study(
@@ -61,8 +83,9 @@ pub fn index_study(
     task_id: &[u8; 16],
     source_id: &[u8; 16],
     subject_id: &[u8; 16],
-) -> Option<Box<dyn View>> {
-    get_view(view)
+) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_study(path, node, task_id, source_id, subject_id)
 }
 
 pub fn index_series(
@@ -73,8 +96,9 @@ pub fn index_series(
     source_id: &[u8; 16],
     subject_id: &[u8; 16],
     study_id: &[u8; 16],
-) -> Option<Box<dyn View>> {
-    get_view(view)
+) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_series(path, node, task_id, source_id, subject_id, study_id)
 }
 
 pub fn index_instance(
@@ -85,6 +109,10 @@ pub fn index_instance(
     source_id: &[u8; 16],
     subject_id: &[u8; 16],
     study_id: &[u8; 16],
-) -> Option<Box<dyn View>> {
-    get_view(view)
+    series_id: &[u8; 16],
+) -> Result<(), ()> {
+    let v = get_view(view).ok_or(())?;
+    v.index_instance(
+        path, node, task_id, source_id, subject_id, study_id, series_id,
+    )
 }

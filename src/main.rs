@@ -1,4 +1,5 @@
 mod core;
+mod files;
 mod tester;
 mod views;
 
