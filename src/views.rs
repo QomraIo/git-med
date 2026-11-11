@@ -15,44 +15,77 @@ use crate::views::qomra::Qomra;
 use crate::views::traits::View;
 
 pub fn get_view(view: &str) -> Option<Box<dyn View>> {
+    get_view_in(view, Path::new("."))
+}
+
+/// Resolve a [`View`] implementation configured to operate under `repo_root`.
+pub fn get_view_in(view: &str, repo_root: &Path) -> Option<Box<dyn View>> {
     match view {
         "brats" => Some(Box::new(Brats::default())),
         "dicom" => Some(Box::new(Dicom::default())),
-        "qomra" => Some(Box::new(Qomra::default())),
+        "qomra" => Some(Box::new(Qomra::new(repo_root))),
         _ => None,
     }
 }
 
+/// Return `true` when `node` has no stored hash or its cached file metadata differs from `filemetadata`.
 pub fn should_hash(node: &NodeRef, filemetadata: &FileMetadata) -> bool {
     let node = node.borrow();
-    if node.meta_metadata <= *filemetadata || node.node_metadata <= *filemetadata {
+    if node.self_hash.is_none() {
         return true;
     }
 
-    if node.node_metadata.size.is_some() {
-        return node.node_metadata.size != filemetadata.size;
-    }
-    if node.meta_metadata.size.is_some() {
-        return node.meta_metadata.size != filemetadata.size;
-    }
+    (
+        node.node_metadata.atime,
+        node.node_metadata.mtime,
+        node.node_metadata.size,
+    ) != (filemetadata.atime, filemetadata.mtime, filemetadata.size)
+}
 
-    false
+fn index_if_needed<F>(
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    index_fn: F,
+) -> Result<(), ()>
+where
+    F: FnOnce() -> Result<(), ()>,
+{
+    let disk_path = repo_root.join(rel_path);
+    let file_metadata = get_file_metadata(&disk_path);
+    if should_hash(node, &file_metadata) {
+        index_fn()?;
+    }
+    node.borrow_mut().visited = true;
+    Ok(())
 }
 
 pub fn index_root(view: &str, path: &Path, node: &NodeRef) -> Result<(), ()> {
-    let file_metadata = get_file_metadata(path);
-    match should_hash(node, &file_metadata) {
-        true => {
-            let v = get_view(view).ok_or(())?;
-            v.index_root(path, node)
-        }
-        false => Ok(()),
-    }
+    let v = get_view(view).ok_or(())?;
+    index_root_in(v.as_ref(), Path::new("."), path, node)
+}
+
+pub fn index_root_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || view.index_root(rel_path, node))
 }
 
 pub fn index_task(view: &str, path: &Path, node: &NodeRef) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_task(path, node)
+    index_task_in(v.as_ref(), Path::new("."), path, node)
+}
+
+pub fn index_task_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || view.index_task(rel_path, node))
 }
 
 pub fn index_source(
@@ -62,7 +95,19 @@ pub fn index_source(
     task_id: &[u8; 16],
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_source(path, node, task_id)
+    index_source_in(v.as_ref(), Path::new("."), path, node, task_id)
+}
+
+pub fn index_source_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    task_id: &[u8; 16],
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || {
+        view.index_source(rel_path, node, task_id)
+    })
 }
 
 pub fn index_subject(
@@ -73,7 +118,20 @@ pub fn index_subject(
     source_id: &[u8; 16],
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_subject(path, node, task_id, source_id)
+    index_subject_in(v.as_ref(), Path::new("."), path, node, task_id, source_id)
+}
+
+pub fn index_subject_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    task_id: &[u8; 16],
+    source_id: &[u8; 16],
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || {
+        view.index_subject(rel_path, node, task_id, source_id)
+    })
 }
 
 pub fn index_study(
@@ -85,7 +143,29 @@ pub fn index_study(
     subject_id: &[u8; 16],
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_study(path, node, task_id, source_id, subject_id)
+    index_study_in(
+        v.as_ref(),
+        Path::new("."),
+        path,
+        node,
+        task_id,
+        source_id,
+        subject_id,
+    )
+}
+
+pub fn index_study_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    task_id: &[u8; 16],
+    source_id: &[u8; 16],
+    subject_id: &[u8; 16],
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || {
+        view.index_study(rel_path, node, task_id, source_id, subject_id)
+    })
 }
 
 pub fn index_series(
@@ -98,7 +178,31 @@ pub fn index_series(
     study_id: &[u8; 16],
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_series(path, node, task_id, source_id, subject_id, study_id)
+    index_series_in(
+        v.as_ref(),
+        Path::new("."),
+        path,
+        node,
+        task_id,
+        source_id,
+        subject_id,
+        study_id,
+    )
+}
+
+pub fn index_series_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    task_id: &[u8; 16],
+    source_id: &[u8; 16],
+    subject_id: &[u8; 16],
+    study_id: &[u8; 16],
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || {
+        view.index_series(rel_path, node, task_id, source_id, subject_id, study_id)
+    })
 }
 
 pub fn index_instance(
@@ -112,7 +216,109 @@ pub fn index_instance(
     series_id: &[u8; 16],
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
-    v.index_instance(
-        path, node, task_id, source_id, subject_id, study_id, series_id,
+    index_instance_in(
+        v.as_ref(),
+        Path::new("."),
+        path,
+        node,
+        task_id,
+        source_id,
+        subject_id,
+        study_id,
+        series_id,
     )
+}
+
+pub fn index_instance_in(
+    view: &dyn View,
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+    task_id: &[u8; 16],
+    source_id: &[u8; 16],
+    subject_id: &[u8; 16],
+    study_id: &[u8; 16],
+    series_id: &[u8; 16],
+) -> Result<(), ()> {
+    index_if_needed(repo_root, rel_path, node, || {
+        view.index_instance(
+            rel_path, node, task_id, source_id, subject_id, study_id, series_id,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tree::{ChildrenType, Node};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn test_should_hash_detects_missing_hash_and_metadata_changes() {
+        let node = Node::new([1u8; 16], ChildrenType::None);
+        let t1 = UNIX_EPOCH + Duration::new(1_700_000_000, 0);
+        let t2 = UNIX_EPOCH + Duration::new(1_700_000_001, 0);
+        let meta = FileMetadata {
+            atime: t1,
+            mtime: t1,
+            size: Some(100),
+        };
+
+        // New node with self_hash == None must be hashed.
+        assert!(should_hash(&node, &meta));
+
+        {
+            let mut n = node.borrow_mut();
+            n.self_hash = Some(blake3::hash(b"data"));
+            n.node_metadata = meta;
+        }
+        // Unchanged metadata should skip re-hashing.
+        assert!(!should_hash(&node, &meta));
+
+        // Changed mtime, atime, or size must trigger re-hashing.
+        assert!(should_hash(
+            &node,
+            &FileMetadata {
+                mtime: t2,
+                ..meta
+            }
+        ));
+        assert!(should_hash(
+            &node,
+            &FileMetadata {
+                atime: t2,
+                ..meta
+            }
+        ));
+        assert!(should_hash(
+            &node,
+            &FileMetadata {
+                size: Some(101),
+                ..meta
+            }
+        ));
+    }
+
+    #[test]
+    fn test_index_if_needed_marks_visited_when_unchanged() {
+        let temp_dir = std::env::temp_dir().join(format!("git_med_views_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("sample.bin");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let meta = get_file_metadata(&file_path);
+        let node = Node::new([2u8; 16], ChildrenType::None);
+        {
+            let mut n = node.borrow_mut();
+            n.self_hash = Some(blake3::hash(b"hello"));
+            n.node_metadata = meta;
+            n.visited = false;
+        }
+
+        let view = Qomra::new(&temp_dir);
+        index_root_in(&view, &temp_dir, Path::new("sample.bin"), &node).unwrap();
+        assert!(node.borrow().visited);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

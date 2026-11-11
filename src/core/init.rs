@@ -5,11 +5,17 @@ pub fn init(args: &Vec<String>) {
     if args.len() <= 2 {
         panic!("Please provide a name");
     }
-    let name = &args[2];
-    let repo_path = Path::new(name);
+    if Path::new(".git-med").exists() {
+        panic!(".git-med already exists");
+    }
+    init_at(Path::new(&args[2]));
+}
+
+/// Initialize a `.git-med` repository directory under `repo_path`.
+pub(crate) fn init_at(repo_path: &Path) {
     let git_med_path = repo_path.join(".git-med");
 
-    if Path::new(".git-med").exists() || git_med_path.exists() {
+    if git_med_path.exists() {
         panic!(".git-med already exists");
     }
 
@@ -28,8 +34,7 @@ pub fn init(args: &Vec<String>) {
     File::create(git_med_path.join("index")).expect("Failed to create index file");
     fs::write(git_med_path.join("HEAD"), "ref: refs/heads/main\n")
         .expect("Failed to create HEAD file");
-    File::create(git_med_path.join("VIEW")).expect("Failed to create index file");
-    fs::write(git_med_path.join("VIEW"), "DICOM\n").expect("Failed to create HEAD file");
+    fs::write(git_med_path.join("VIEW"), "QOMRA\n").expect("Failed to create VIEW file");
     File::create(git_med_path.join("refs/heads/main"))
         .expect("Failed to create refs/heads/main file");
 }

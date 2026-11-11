@@ -61,9 +61,8 @@ pub fn make_object(path: &Path, hash: Hash, obj_type: ObjectType) -> Result<()> 
     make_object_in(path, hash, obj_type, Path::new("."))
 }
 
-// in .git-med/{objects|meta_objects}/{dir}/{filename}
-// write header `<type> <byte_length>\0` then stream a copy of the file from path
-fn make_object_in(
+/// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+pub fn make_object_in(
     path: &Path,
     hash: Hash,
     obj_type: ObjectType,

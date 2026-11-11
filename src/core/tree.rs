@@ -50,6 +50,7 @@ pub struct Node {
     pub id: [u8; 16],
 
     pub children: Children,
+    pub meta: BTreeMap<[u8; 16], NodeRef>,
     pub parent: Option<WeakNodeRef>, // root has no parent
 
     pub visited: bool,
@@ -72,6 +73,7 @@ impl std::fmt::Debug for Node {
         f.debug_struct("Node")
             .field("id", &self.id)
             .field("children", &self.children)
+            .field("meta_count", &self.meta.len())
             .field("visited", &self.visited)
             .field("valid_child_hash", &self.valid_child_hash)
             .field("valid_self_hash", &self.valid_self_hash)
@@ -98,6 +100,7 @@ impl Node {
         Rc::new(RefCell::new(Node {
             id,
             children,
+            meta: BTreeMap::new(),
             parent: None,
             visited: false,
             valid_child_hash: false,
@@ -192,6 +195,81 @@ impl Node {
     ) -> Result<NodeRef, TreeError> {
         deserialize_node(reader, parent, 0)
     }
+
+    /// Reset `visited` to `false` across this node, its `meta` entries, and its subtree.
+    pub fn reset_visited(&mut self) {
+        self.visited = false;
+        for meta_ref in self.meta.values() {
+            meta_ref.borrow_mut().reset_visited();
+        }
+        match &self.children {
+            Children::Attributes(map) | Children::Files(map) => {
+                for child_ref in map.values() {
+                    child_ref.borrow_mut().reset_visited();
+                }
+            }
+            Children::None => {}
+        }
+    }
+
+    /// Recursively prune unvisited entries from `meta` and `children`.
+    /// Returns `true` if any entry in `meta` or `children` (at any depth) was removed.
+    pub fn prune_unvisited(&mut self) -> bool {
+        let mut meta_pruned = false;
+        self.meta.retain(|_, meta_ref| {
+            let keep = meta_ref.borrow().visited;
+            if !keep {
+                meta_ref.borrow_mut().parent = None;
+                meta_pruned = true;
+            }
+            keep
+        });
+        if meta_pruned {
+            self.valid_self_hash = false;
+        }
+
+        let mut child_pruned = false;
+        match &mut self.children {
+            Children::Attributes(map) | Children::Files(map) => {
+                map.retain(|_, child_ref| {
+                    let (keep, descendant_changed) = {
+                        let mut child = child_ref.borrow_mut();
+                        let changed = child.prune_unvisited();
+                        (child.visited, changed)
+                    };
+                    if descendant_changed {
+                        child_pruned = true;
+                    }
+                    if !keep {
+                        child_ref.borrow_mut().parent = None;
+                        child_pruned = true;
+                    }
+                    keep
+                });
+            }
+            Children::None => {}
+        }
+        if child_pruned {
+            self.valid_child_hash = false;
+        }
+
+        child_pruned || meta_pruned
+    }
+}
+
+fn get_or_insert_in_map(
+    parent_ref: &NodeRef,
+    map: &mut BTreeMap<[u8; 16], NodeRef>,
+    id: [u8; 16],
+    children_type: ChildrenType,
+) -> NodeRef {
+    if let Some(node) = map.get(&id) {
+        return Rc::clone(node);
+    }
+    let child = Node::new(id, children_type);
+    child.borrow_mut().parent = Some(Rc::downgrade(parent_ref));
+    map.insert(id, Rc::clone(&child));
+    child
 }
 
 /// Look up a child by `id` under `parent_ref`, or insert a new node with `children_type`.
@@ -200,18 +278,19 @@ pub fn get_or_insert_child(
     id: [u8; 16],
     children_type: ChildrenType,
 ) -> Result<NodeRef, ()> {
-    {
-        let parent = parent_ref.borrow();
-        match &parent.children {
-            Children::Attributes(map) | Children::Files(map) => {
-                if let Some(node) = map.get(&id) {
-                    return Ok(Rc::clone(node));
-                }
-            }
-            Children::None => return Err(()),
+    let mut parent = parent_ref.borrow_mut();
+    match &mut parent.children {
+        Children::Attributes(map) | Children::Files(map) => {
+            Ok(get_or_insert_in_map(parent_ref, map, id, children_type))
         }
+        Children::None => Err(()),
     }
-    Node::insert(parent_ref, ChildType::Ref(Node::new(id, children_type)))
+}
+
+/// Look up a metadata file node by `id` in `parent_ref.meta`, or insert a leaf node if absent.
+pub fn get_or_insert_meta(parent_ref: &NodeRef, id: [u8; 16]) -> NodeRef {
+    let mut parent = parent_ref.borrow_mut();
+    get_or_insert_in_map(parent_ref, &mut parent.meta, id, ChildrenType::None)
 }
 
 fn save_to_file<P, F>(path: P, write_fn: F) -> Result<(), TreeError>
@@ -297,6 +376,16 @@ impl Tree {
         }
         Ok(Self { root })
     }
+
+    /// Reset `visited` to `false` across every node and metadata entry in the tree.
+    pub fn reset_visited(&self) {
+        self.root.borrow_mut().reset_visited();
+    }
+
+    /// Prune all unvisited `meta` and `children` nodes from the tree.
+    pub fn prune_unvisited(&self) -> bool {
+        self.root.borrow_mut().prune_unvisited()
+    }
 }
 
 // ============================================================================
@@ -342,7 +431,7 @@ impl From<std::io::Error> for TreeError {
 // ============================================================================
 
 pub const TREE_MAGIC: &[u8; 8] = b"GMEDTR01";
-pub const TREE_VERSION: u32 = 1;
+pub const TREE_VERSION: u32 = 2;
 const MAX_TREE_DEPTH: usize = 128;
 
 fn write_header<W: Write>(writer: &mut W) -> Result<(), TreeError> {
@@ -612,6 +701,13 @@ fn serialize_node_internal<W: Write>(
         }
     }
 
+    // 6. Write meta map
+    if node.meta.is_empty() {
+        writer.write_all(&[0u8])?;
+    } else {
+        write_children_map(1u8, &node.meta, writer, depth)?;
+    }
+
     Ok(())
 }
 
@@ -676,9 +772,24 @@ fn deserialize_node<R: Read>(
         }
     };
 
+    // 6. Read meta map
+    let mut meta_disc_buf = [0u8; 1];
+    reader.read_exact(&mut meta_disc_buf)?;
+    let meta = match meta_disc_buf[0] {
+        0 => BTreeMap::new(),
+        1 => read_children_map(reader, &node_ref, depth)?,
+        other => {
+            return Err(TreeError::CorruptedData(format!(
+                "Invalid meta discriminant: {}",
+                other
+            )));
+        }
+    };
+
     {
         let mut node = node_ref.borrow_mut();
         node.children = children;
+        node.meta = meta;
         node.visited = visited;
         node.valid_child_hash = valid_child_hash;
         node.valid_self_hash = valid_self_hash;
@@ -1117,12 +1228,22 @@ mod tests {
         let mut buf = Vec::new();
         Tree::from_root(node).write_to(&mut buf).unwrap();
 
-        let last = buf.len() - 1;
-        assert_eq!(buf[last], 0u8);
-        buf[last] = 0xFF;
+        let children_disc = buf.len() - 2;
+        assert_eq!(buf[children_disc], 0u8);
+        let mut bad_children = buf.clone();
+        bad_children[children_disc] = 0xFF;
+        assert!(matches!(
+            Tree::read_from(&mut &bad_children[..]),
+            Err(TreeError::CorruptedData(_))
+        ));
 
-        let result = Tree::read_from(&mut &buf[..]);
-        assert!(matches!(result, Err(TreeError::CorruptedData(_))));
+        let meta_disc = buf.len() - 1;
+        assert_eq!(buf[meta_disc], 0u8);
+        buf[meta_disc] = 0xFF;
+        assert!(matches!(
+            Tree::read_from(&mut &buf[..]),
+            Err(TreeError::CorruptedData(_))
+        ));
     }
 
     #[test]
@@ -1177,7 +1298,7 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend_from_slice(TREE_MAGIC);
         stream.extend_from_slice(&TREE_VERSION.to_be_bytes());
-        // Root node: id + flags + two empty FileMetadata (25 bytes each) + disc(1) + count(2)
+        // Root node: id + flags + two empty FileMetadata + children(disc 1, count 2) + meta(0)
         stream.extend_from_slice(&[0u8; 16]);
         stream.push(0u8);
         write_file_metadata(&NodeMetadata::default(), &mut stream).unwrap();
@@ -1186,6 +1307,7 @@ mod tests {
         stream.extend_from_slice(&2u32.to_be_bytes());
         stream.extend_from_slice(&child_bytes);
         stream.extend_from_slice(&child_bytes);
+        stream.push(0u8);
 
         let result = Tree::read_from(&mut &stream[..]);
         assert!(matches!(result, Err(TreeError::CorruptedData(_))));
@@ -1218,6 +1340,7 @@ mod tests {
                 deep_stream.push(1u8);
                 deep_stream.extend_from_slice(&1u32.to_be_bytes());
             } else {
+                deep_stream.push(0u8);
                 deep_stream.push(0u8);
             }
         }
@@ -1409,5 +1532,89 @@ mod tests {
         let corrupt_err = TreeError::CorruptedData("bad tag".to_string());
         assert!(corrupt_err.source().is_none());
         assert!(corrupt_err.to_string().contains("bad tag"));
+    }
+
+    #[test]
+    fn test_meta_btree_roundtrip_and_parent_links() {
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let readme_id = [1u8; 16];
+        let meta_json_id = [2u8; 16];
+
+        let readme = get_or_insert_meta(&root, readme_id);
+        let readme_hash = blake3::hash(b"readme");
+        readme.borrow_mut().self_hash = Some(readme_hash);
+        readme.borrow_mut().visited = true;
+
+        let meta_json = get_or_insert_meta(&root, meta_json_id);
+        let meta_hash = blake3::hash(b"meta_json");
+        meta_json.borrow_mut().self_hash = Some(meta_hash);
+
+        // Calling get_or_insert_meta again returns the same NodeRef.
+        let same_readme = get_or_insert_meta(&root, readme_id);
+        assert!(Rc::ptr_eq(&readme, &same_readme));
+
+        let mut buf = Vec::new();
+        Tree::from_root(root).write_to(&mut buf).unwrap();
+        let loaded = Tree::read_from(&mut &buf[..]).unwrap();
+
+        let root_ref = loaded.root.borrow();
+        assert_eq!(root_ref.meta.len(), 2);
+        let loaded_readme = root_ref.meta.get(&readme_id).unwrap();
+        assert_eq!(loaded_readme.borrow().self_hash, Some(readme_hash));
+        assert!(loaded_readme.borrow().visited);
+        assert_eq!(
+            loaded_readme.borrow().parent().unwrap().borrow().id,
+            [0u8; 16]
+        );
+        assert_eq!(
+            root_ref.meta.get(&meta_json_id).unwrap().borrow().self_hash,
+            Some(meta_hash)
+        );
+    }
+
+    #[test]
+    fn test_reset_visited_and_prune_unvisited() {
+        let tree = Tree::new([0u8; 16]);
+        let task = get_or_insert_child(&tree.root, [1u8; 16], ChildrenType::Files).unwrap();
+        let kept_file = get_or_insert_child(&task, [2u8; 16], ChildrenType::None).unwrap();
+        let deleted_file = get_or_insert_child(&task, [3u8; 16], ChildrenType::None).unwrap();
+        let kept_meta = get_or_insert_meta(&tree.root, [4u8; 16]);
+        let deleted_meta = get_or_insert_meta(&task, [5u8; 16]);
+
+        for n in [&tree.root, &task, &kept_file, &deleted_file, &kept_meta, &deleted_meta] {
+            let mut b = n.borrow_mut();
+            b.visited = true;
+            b.valid_child_hash = true;
+            b.valid_self_hash = true;
+        }
+
+        tree.reset_visited();
+        for n in [&tree.root, &task, &kept_file, &deleted_file, &kept_meta, &deleted_meta] {
+            assert!(!n.borrow().visited);
+        }
+
+        // Re-visit only kept nodes.
+        tree.root.borrow_mut().visited = true;
+        task.borrow_mut().visited = true;
+        kept_file.borrow_mut().visited = true;
+        kept_meta.borrow_mut().visited = true;
+
+        assert!(tree.prune_unvisited());
+
+        assert!(tree.root.borrow().meta.contains_key(&[4u8; 16]));
+        assert!(!task.borrow().meta.contains_key(&[5u8; 16]));
+        assert!(deleted_meta.borrow().parent().is_none());
+        assert!(!task.borrow().valid_self_hash);
+        assert!(!task.borrow().valid_child_hash);
+        assert!(!tree.root.borrow().valid_child_hash);
+
+        match &task.borrow().children {
+            Children::Files(map) => {
+                assert!(map.contains_key(&[2u8; 16]));
+                assert!(!map.contains_key(&[3u8; 16]));
+            }
+            _ => panic!("Expected Children::Files"),
+        }
+        assert!(deleted_file.borrow().parent().is_none());
     }
 }
