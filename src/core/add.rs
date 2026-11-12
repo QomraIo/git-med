@@ -1,6 +1,5 @@
-use crate::core::tree::{
-    get_or_insert_child, get_or_insert_meta, ChildrenType, NodeRef, Tree,
-};
+use crate::core::tree::load_or_init_tree;
+use crate::core::tree::{ChildrenType, NodeRef, Tree, get_or_insert_child, get_or_insert_meta};
 use crate::views::qomra::is_metafile;
 use crate::views::traits::View;
 use crate::views::utils::bytes2buf128;
@@ -213,8 +212,8 @@ fn index_file_with_view(
         return Ok(());
     };
 
-    let instance_node =
-        get_or_insert_child(&series_node, instance_id, ChildrenType::None).map_err(|_| err_msg())?;
+    let instance_node = get_or_insert_child(&series_node, instance_id, ChildrenType::None)
+        .map_err(|_| err_msg())?;
     let target_node = if is_metafile(rel_path) {
         get_or_insert_meta(&instance_node, file_id)
     } else {
@@ -275,18 +274,6 @@ fn dfs_in(repo_root: &Path, root: &NodeRef, view: &mut dyn View) -> Result<(), S
         }
     }
     Ok(())
-}
-
-fn load_or_init_tree(index_path: &Path) -> Result<Tree, String> {
-    if index_path.exists() {
-        let meta = fs::metadata(index_path)
-            .map_err(|e| format!("failed to stat {}: {}", index_path.display(), e))?;
-        if meta.len() > 0 {
-            return Tree::load(index_path)
-                .map_err(|e| format!("failed to load {}: {}", index_path.display(), e));
-        }
-    }
-    Ok(Tree::new([0u8; 16]))
 }
 
 fn read_view_name(view_path: &Path) -> Result<String, String> {
@@ -431,7 +418,11 @@ mod tests {
     fn test_add_requires_git_med_repo() {
         let repo = AddTempRepo::new("no_repo");
         let err = add_in(&repo.path).expect_err("add_in should fail outside repo");
-        assert!(err.contains("not a git-med repository"), "unexpected error: {}", err);
+        assert!(
+            err.contains("not a git-med repository"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -469,8 +460,7 @@ mod tests {
         let series_dir = repo
             .path
             .join("data/clinic/subject_001/study_001/series_001");
-        fs::write(repo.path.join(".gitignore"), "*.tmp\nignored_dir/\n")
-            .expect("write .gitignore");
+        fs::write(repo.path.join(".gitignore"), "*.tmp\nignored_dir/\n").expect("write .gitignore");
         fs::create_dir_all(repo.path.join(".git")).expect("create .git");
         fs::write(repo.path.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write .git/HEAD");
         fs::write(repo.path.join("scratch.tmp"), "ignore me").expect("write tmp");
@@ -480,24 +470,26 @@ mod tests {
             .expect("write sidecar");
 
         fs::write(repo.path.join("README.md"), "# Dataset\n").expect("write README");
-        fs::write(repo.path.join("data/meta.json"), r#"{"level":"task"}"#).expect("write task meta");
-        fs::write(repo.path.join("data/clinic/source.notes.txt"), "clinic notes")
-            .expect("write source stray");
+        fs::write(repo.path.join("data/meta.json"), r#"{"level":"task"}"#)
+            .expect("write task meta");
+        fs::write(
+            repo.path.join("data/clinic/source.notes.txt"),
+            "clinic notes",
+        )
+        .expect("write source stray");
         fs::write(
             repo.path.join("data/clinic/subject_001/meta.subject.json"),
             r#"{"level":"subject"}"#,
         )
         .expect("write subject meta");
         fs::write(
-            repo.path.join("data/clinic/subject_001/study_001/meta.study.json"),
+            repo.path
+                .join("data/clinic/subject_001/study_001/meta.study.json"),
             r#"{"level":"study"}"#,
         )
         .expect("write study meta");
-        fs::write(
-            series_dir.join("meta.series.json"),
-            r#"{"level":"series"}"#,
-        )
-        .expect("write series meta");
+        fs::write(series_dir.join("meta.series.json"), r#"{"level":"series"}"#)
+            .expect("write series meta");
 
         add_in(&repo.path).expect("add_in should succeed");
         assert!(
@@ -507,35 +499,60 @@ mod tests {
 
         let tree = Tree::load(&repo.path.join(".git-med/index")).expect("load saved index");
         assert!(tree.root.borrow().visited);
-        assert!(get_meta(&tree.root, ".gitignore").is_some(), ".gitignore should be indexed");
-        assert!(get_meta(&tree.root, "README.md").is_some(), "README.md should be indexed");
-        assert!(get_meta(&tree.root, "scratch.tmp").is_none(), "*.tmp must be skipped");
-        assert!(get_child(&tree.root, ".git").is_none(), ".git must be skipped");
-        assert!(get_child(&tree.root, "ignored_dir").is_none(), "ignored_dir must be skipped");
+        assert!(
+            get_meta(&tree.root, ".gitignore").is_some(),
+            ".gitignore should be indexed"
+        );
+        assert!(
+            get_meta(&tree.root, "README.md").is_some(),
+            "README.md should be indexed"
+        );
+        assert!(
+            get_meta(&tree.root, "scratch.tmp").is_none(),
+            "*.tmp must be skipped"
+        );
+        assert!(
+            get_child(&tree.root, ".git").is_none(),
+            ".git must be skipped"
+        );
+        assert!(
+            get_child(&tree.root, "ignored_dir").is_none(),
+            "ignored_dir must be skipped"
+        );
 
         let task = get_child(&tree.root, "data").expect("missing task node");
         assert!(task.borrow().visited);
         let task_meta = get_meta(&task, "meta.json").expect("missing task meta.json");
-        let expected_task_meta_hash = hash(&repo.path.join("data/meta.json"), None, ObjectType::Meta);
+        let expected_task_meta_hash =
+            hash(&repo.path.join("data/meta.json"), None, ObjectType::Meta);
         assert_eq!(task_meta.borrow().self_hash, Some(expected_task_meta_hash));
-        assert!(expected_object_file(
-            &repo.path,
-            ObjectType::Meta,
-            &expected_task_meta_hash
-        )
-        .is_file());
+        assert!(
+            expected_object_file(&repo.path, ObjectType::Meta, &expected_task_meta_hash).is_file()
+        );
 
         let source = get_child(&task, "clinic").expect("missing source node");
-        assert!(get_meta(&source, "source.notes.txt").is_some(), "missing source stray file");
+        assert!(
+            get_meta(&source, "source.notes.txt").is_some(),
+            "missing source stray file"
+        );
 
         let subject = get_child(&source, "subject_001").expect("missing subject node");
-        assert!(get_meta(&subject, "meta.subject.json").is_some(), "missing subject meta");
+        assert!(
+            get_meta(&subject, "meta.subject.json").is_some(),
+            "missing subject meta"
+        );
 
         let study = get_child(&subject, "study_001").expect("missing study node");
-        assert!(get_meta(&study, "meta.study.json").is_some(), "missing study meta");
+        assert!(
+            get_meta(&study, "meta.study.json").is_some(),
+            "missing study meta"
+        );
 
         let series = get_child(&study, "series_001").expect("missing series node");
-        assert!(get_meta(&series, "meta.series.json").is_some(), "missing series meta");
+        assert!(
+            get_meta(&series, "meta.series.json").is_some(),
+            "missing series meta"
+        );
         assert!(
             get_meta(&series, ".view.instance_001.dcm").is_none(),
             ".view sidecar must be skipped"
@@ -545,11 +562,7 @@ mod tests {
         let inst2 = get_child(&series, "instance_002.dcm").expect("missing instance_002.dcm");
         assert!(inst1.borrow().visited && inst2.borrow().visited);
 
-        let expected_blob_hash = hash(
-            &series_dir.join("instance_001.dcm"),
-            None,
-            ObjectType::Blob,
-        );
+        let expected_blob_hash = hash(&series_dir.join("instance_001.dcm"), None, ObjectType::Blob);
         assert_eq!(inst1.borrow().self_hash, Some(expected_blob_hash));
         assert!(expected_object_file(&repo.path, ObjectType::Blob, &expected_blob_hash).is_file());
     }
@@ -576,7 +589,9 @@ mod tests {
         let index_path = repo.path.join(".git-med/index");
         let initial_tree = Tree::load(&index_path).expect("load initial index");
         mark_all_hash_flags_valid(&initial_tree.root);
-        initial_tree.save(&index_path).expect("save marked initial index");
+        initial_tree
+            .save(&index_path)
+            .expect("save marked initial index");
 
         let old_inst1_hash = get_child(
             &get_child(
@@ -682,22 +697,17 @@ mod tests {
             "deleted instance_002.dcm must be pruned"
         );
 
-        let new_inst1 = get_child(&series, "instance_001.dcm").expect("missing modified instance_001");
+        let new_inst1 =
+            get_child(&series, "instance_001.dcm").expect("missing modified instance_001");
         let expected_new_inst1_hash = hash(&inst1_path, None, ObjectType::Blob);
         assert!(new_inst1.borrow().visited);
         assert_ne!(old_inst1_hash, expected_new_inst1_hash);
-        assert_eq!(
-            new_inst1.borrow().self_hash,
-            Some(expected_new_inst1_hash)
-        );
+        assert_eq!(new_inst1.borrow().self_hash, Some(expected_new_inst1_hash));
 
         let new_meta = get_meta(&series, "meta.json").expect("missing modified meta.json");
         let expected_new_meta_hash = hash(&series_meta_path, None, ObjectType::Meta);
         assert!(new_meta.borrow().visited);
         assert_ne!(old_meta_hash, expected_new_meta_hash);
-        assert_eq!(
-            new_meta.borrow().self_hash,
-            Some(expected_new_meta_hash)
-        );
+        assert_eq!(new_meta.borrow().self_hash, Some(expected_new_meta_hash));
     }
 }

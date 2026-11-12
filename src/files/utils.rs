@@ -56,9 +56,79 @@ pub fn hash(path: &Path, size: Option<u64>, obj_type: ObjectType) -> Hash {
     hasher.finalize()
 }
 
+/// Compute the Git-style single-pass BLAKE3 object hash from in-memory bytes (`"<type> <len>\0" || bytes`).
+pub fn hash_bytes(bytes: &[u8], obj_type: ObjectType) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&object_header(obj_type, bytes.len() as u64));
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
 /// Write a Git-style uncompressed object atomically under `.git-med/{objects|meta_objects}/{dir}/{filename}`.
 pub fn make_object(path: &Path, hash: Hash, obj_type: ObjectType) -> Result<()> {
     make_object_in(path, hash, obj_type, Path::new("."))
+}
+
+/// Write an in-memory Git-style object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+pub fn make_object_from_bytes_in(
+    bytes: &[u8],
+    hash: Hash,
+    obj_type: ObjectType,
+    repo_root: &Path,
+) -> Result<()> {
+    let hex = hash.to_hex();
+    let dir = &hex[..2];
+    let filename = &hex[2..];
+
+    let object_dir = repo_root.join(".git-med").join(obj_type.dir_name()).join(dir);
+    let object_path = object_dir.join(filename);
+
+    if object_path.exists() {
+        return Ok(());
+    }
+
+    let header = object_header(obj_type, bytes.len() as u64);
+    fs::create_dir_all(&object_dir)?;
+
+    let tmp_seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = object_dir.join(format!(
+        ".{}.tmp.{}.{}",
+        filename,
+        std::process::id(),
+        tmp_seq
+    ));
+
+    let tmp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)?;
+
+    let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, tmp_file);
+    if let Err(err) = writer.write_all(&header).and_then(|_| writer.write_all(bytes)) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = writer.flush() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    let inner_file = match writer.into_inner() {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into_error());
+        }
+    };
+
+    if let Err(err) = inner_file.sync_all() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    fs::rename(&tmp_path, &object_path)?;
+    Ok(())
 }
 
 /// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
@@ -224,6 +294,7 @@ mod tests {
             let other_type = match obj_type {
                 ObjectType::Blob => ObjectType::Meta,
                 ObjectType::Meta => ObjectType::Blob,
+                ObjectType::Tree | ObjectType::Commit => ObjectType::Meta,
             };
             assert!(!repo_root.join(".git-med").join(other_type.dir_name()).exists());
 

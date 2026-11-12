@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -10,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use blake3::Hash;
 
+use crate::files::commit::save_tree;
 use crate::files::types::FileMetadata;
 
 // Type aliases make the signatures much cleaner and easier to read
@@ -386,6 +388,10 @@ impl Tree {
     pub fn prune_unvisited(&self) -> bool {
         self.root.borrow_mut().prune_unvisited()
     }
+
+    pub fn hash(&self) -> blake3::Hash {
+        save_tree(self.root.clone()).unwrap()
+    }
 }
 
 // ============================================================================
@@ -431,7 +437,7 @@ impl From<std::io::Error> for TreeError {
 // ============================================================================
 
 pub const TREE_MAGIC: &[u8; 8] = b"GMEDTR01";
-pub const TREE_VERSION: u32 = 2;
+pub const TREE_VERSION: u32 = 1;
 const MAX_TREE_DEPTH: usize = 128;
 
 fn write_header<W: Write>(writer: &mut W) -> Result<(), TreeError> {
@@ -803,6 +809,22 @@ fn deserialize_node<R: Read>(
     }
 
     Ok(node_ref)
+}
+
+pub fn load_or_fail_tree(index_path: &Path) -> Result<Tree, String> {
+    if index_path.exists() {
+        let meta = fs::metadata(index_path)
+            .map_err(|e| format!("failed to stat {}: {}", index_path.display(), e))?;
+        if meta.len() > 0 {
+            return Tree::load(index_path)
+                .map_err(|e| format!("failed to load {}: {}", index_path.display(), e));
+        }
+    }
+    Err(format!("No tree found at {}", index_path.display()))
+}
+
+pub fn load_or_init_tree(index_path: &Path) -> Result<Tree, String> {
+    load_or_fail_tree(index_path).or_else(|_| Ok(Tree::new([0u8; 16])))
 }
 
 #[cfg(test)]
@@ -1581,7 +1603,14 @@ mod tests {
         let kept_meta = get_or_insert_meta(&tree.root, [4u8; 16]);
         let deleted_meta = get_or_insert_meta(&task, [5u8; 16]);
 
-        for n in [&tree.root, &task, &kept_file, &deleted_file, &kept_meta, &deleted_meta] {
+        for n in [
+            &tree.root,
+            &task,
+            &kept_file,
+            &deleted_file,
+            &kept_meta,
+            &deleted_meta,
+        ] {
             let mut b = n.borrow_mut();
             b.visited = true;
             b.valid_child_hash = true;
@@ -1589,7 +1618,14 @@ mod tests {
         }
 
         tree.reset_visited();
-        for n in [&tree.root, &task, &kept_file, &deleted_file, &kept_meta, &deleted_meta] {
+        for n in [
+            &tree.root,
+            &task,
+            &kept_file,
+            &deleted_file,
+            &kept_meta,
+            &deleted_meta,
+        ] {
             assert!(!n.borrow().visited);
         }
 
