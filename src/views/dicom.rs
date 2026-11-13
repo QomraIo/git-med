@@ -122,6 +122,10 @@ impl View for Dicom {
     ) -> Result<(), ()> {
         Err(())
     }
+
+    fn write(&self, _root: &NodeRef) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

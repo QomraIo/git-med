@@ -51,4 +51,6 @@ pub trait View {
         study_id: &[u8; 16],
         series_id: &[u8; 16],
     ) -> Result<(), ()>;
+
+    fn write(&self, root: &NodeRef) -> Result<(), String>;
 }

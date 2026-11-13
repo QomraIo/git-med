@@ -4,6 +4,7 @@ mod tester;
 mod views;
 
 use core::add::add;
+use core::branch::branch;
 use core::commit::commit;
 use core::init::init;
 use std::env;
@@ -23,6 +24,7 @@ fn main() {
         "init" => init(&args),
         "add" => add(&args),
         "commit" => commit(&args),
+        "branch" => branch(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }

@@ -141,6 +141,10 @@ impl View for Brats {
     ) -> Result<(), ()> {
         Err(())
     }
+
+    fn write(&self, _root: &NodeRef) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

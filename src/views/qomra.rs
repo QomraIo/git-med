@@ -219,6 +219,10 @@ impl View for Qomra {
             git_add_file_in(&self.repo_root, path, node)
         }
     }
+
+    fn write(&self, _root: &NodeRef) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

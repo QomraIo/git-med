@@ -131,6 +131,65 @@ pub fn make_object_from_bytes_in(
     Ok(())
 }
 
+/// Read an object's type and content payload from `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+pub fn read_object_bytes_in(
+    repo_root: &Path,
+    hash: &Hash,
+) -> std::result::Result<(ObjectType, Vec<u8>), String> {
+    let hex = hash.to_hex();
+    let dir = &hex[..2];
+    let filename = &hex[2..];
+
+    let obj_path = repo_root.join(".git-med/objects").join(dir).join(filename);
+    let path = if obj_path.is_file() {
+        obj_path
+    } else {
+        let meta_path = repo_root
+            .join(".git-med/meta_objects")
+            .join(dir)
+            .join(filename);
+        if meta_path.is_file() {
+            meta_path
+        } else {
+            return Err(format!("object {} not found", hex));
+        }
+    };
+
+    let bytes = fs::read(&path)
+        .map_err(|e| format!("failed to read object {}: {}", path.display(), e))?;
+
+    let null_pos = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| format!("corrupted object {}: missing null header delimiter", hex))?;
+
+    let header_str = std::str::from_utf8(&bytes[..null_pos])
+        .map_err(|e| format!("corrupted object header in {}: {}", hex, e))?;
+
+    let mut parts = header_str.split_whitespace();
+    let type_str = parts
+        .next()
+        .ok_or_else(|| "missing type in object header".to_string())?;
+    let _len_str = parts
+        .next()
+        .ok_or_else(|| "missing length in object header".to_string())?;
+
+    let obj_type = match type_str {
+        "tree" => ObjectType::Tree,
+        "blob" => ObjectType::Blob,
+        "commit" => ObjectType::Commit,
+        "meta" => ObjectType::Meta,
+        other => return Err(format!("unknown object type '{}' in {}", other, hex)),
+    };
+
+    let body = bytes[null_pos + 1..].to_vec();
+    Ok((obj_type, body))
+}
+
+pub fn read_object_bytes(hash: &Hash) -> std::result::Result<(ObjectType, Vec<u8>), String> {
+    read_object_bytes_in(Path::new("."), hash)
+}
+
 /// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
 pub fn make_object_in(
     path: &Path,

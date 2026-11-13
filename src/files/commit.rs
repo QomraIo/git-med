@@ -1,9 +1,37 @@
-use crate::core::tree::{Children, Node, NodeRef};
+use crate::core::tree::{Children, ChildrenType, Node, NodeRef, Tree};
 use crate::files::types::ObjectType;
-use crate::files::utils::{hash_bytes, make_object_from_bytes_in};
+use crate::files::utils::{hash_bytes, make_object_from_bytes_in, read_object_bytes_in};
+use blake3::Hash;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::rc::Rc;
+
+pub fn hex_from_buf16(buf: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(32);
+    for b in buf {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+pub fn buf16_from_hex(hex_str: &str) -> Result<[u8; 16], String> {
+    let hex_trimmed = hex_str.trim();
+    if hex_trimmed.len() != 32 {
+        return Err(format!(
+            "expected 32 hex chars for 16-byte id, got {}",
+            hex_trimmed.len()
+        ));
+    }
+    let mut buf = [0u8; 16];
+    for (i, chunk) in hex_trimmed.as_bytes().chunks_exact(2).enumerate() {
+        let byte_str = std::str::from_utf8(chunk)
+            .map_err(|e| format!("invalid utf8 in hex chunk: {}", e))?;
+        buf[i] = u8::from_str_radix(byte_str, 16)
+            .map_err(|e| format!("invalid hex char in id '{}': {}", hex_trimmed, e))?;
+    }
+    Ok(buf)
+}
 
 pub fn needs_hash(node: NodeRef) -> VecDeque<NodeRef> {
     let mut fringe: VecDeque<NodeRef> = VecDeque::new();
@@ -45,15 +73,18 @@ pub fn needs_hash(node: NodeRef) -> VecDeque<NodeRef> {
     needs_hash_vec
 }
 
-fn format_tree_body(node: &Node) -> Result<Vec<u8>, String> {
+pub fn format_tree_body(node: &Node) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
 
-    // 1. Metadata hashes (sorted by BTreeMap key order)
-    for (_key, meta_node) in &node.meta {
+    // 1. Metadata: <id_hex> <hash_hex>\n (sorted by BTreeMap key order)
+    for (key, meta_node) in &node.meta {
         let m_hash = meta_node
             .borrow()
             .self_hash
             .ok_or_else(|| format!("meta node {:?} missing self_hash", meta_node.borrow().id))?;
+        let id_hex = hex_from_buf16(key);
+        body.extend_from_slice(id_hex.as_bytes());
+        body.push(b' ');
         body.extend_from_slice(m_hash.to_hex().as_bytes());
         body.push(b'\n');
     }
@@ -61,21 +92,196 @@ fn format_tree_body(node: &Node) -> Result<Vec<u8>, String> {
     // 2. Section separator
     body.extend_from_slice(b"\0\0\n");
 
-    // 3. Child hashes (sorted by BTreeMap key order)
+    // 3. Children: container type line followed by <id_hex> <child_hash_hex>\n
     match &node.children {
-        Children::Attributes(map) | Children::Files(map) => {
-            for (_key, child_node) in map {
+        Children::Attributes(map) => {
+            body.extend_from_slice(b"attrs\n");
+            for (key, child_node) in map {
                 let c_hash = child_node.borrow().self_hash.ok_or_else(|| {
                     format!("child node {:?} missing self_hash", child_node.borrow().id)
                 })?;
+                let id_hex = hex_from_buf16(key);
+                body.extend_from_slice(id_hex.as_bytes());
+                body.push(b' ');
                 body.extend_from_slice(c_hash.to_hex().as_bytes());
                 body.push(b'\n');
             }
         }
-        Children::None => {}
+        Children::Files(map) => {
+            body.extend_from_slice(b"files\n");
+            for (key, child_node) in map {
+                let c_hash = child_node.borrow().self_hash.ok_or_else(|| {
+                    format!("child node {:?} missing self_hash", child_node.borrow().id)
+                })?;
+                let id_hex = hex_from_buf16(key);
+                body.extend_from_slice(id_hex.as_bytes());
+                body.push(b' ');
+                body.extend_from_slice(c_hash.to_hex().as_bytes());
+                body.push(b'\n');
+            }
+        }
+        Children::None => {
+            body.extend_from_slice(b"none\n");
+        }
     }
 
     Ok(body)
+}
+
+pub fn load_tree_from_commit(commit_hash: &Hash) -> Result<Tree, String> {
+    load_tree_from_commit_in(Path::new("."), commit_hash)
+}
+
+pub fn load_tree_from_commit_in(repo_root: &Path, commit_hash: &Hash) -> Result<Tree, String> {
+    let (obj_type, body) = read_object_bytes_in(repo_root, commit_hash)?;
+    if obj_type != ObjectType::Commit {
+        return Err(format!(
+            "object {} is not a commit (got {:?})",
+            commit_hash.to_hex(),
+            obj_type
+        ));
+    }
+
+    let body_str = String::from_utf8(body)
+        .map_err(|e| format!("invalid utf-8 in commit {}: {}", commit_hash.to_hex(), e))?;
+    let first_line = body_str
+        .lines()
+        .next()
+        .ok_or_else(|| format!("empty commit body in {}", commit_hash.to_hex()))?;
+    let tree_hash = Hash::from_hex(first_line.trim())
+        .map_err(|e| format!("invalid tree hash '{}' in commit: {}", first_line, e))?;
+
+    let root_node = load_tree_node_in(repo_root, &tree_hash, [0u8; 16])?;
+    Ok(Tree::from_root(root_node))
+}
+
+pub fn load_tree_node_in(
+    repo_root: &Path,
+    tree_hash: &Hash,
+    node_id: [u8; 16],
+) -> Result<NodeRef, String> {
+    let (obj_type, body) = read_object_bytes_in(repo_root, tree_hash)?;
+    if obj_type != ObjectType::Tree {
+        return Err(format!(
+            "expected tree object at {}, got {:?}",
+            tree_hash.to_hex(),
+            obj_type
+        ));
+    }
+
+    let body_str = String::from_utf8(body)
+        .map_err(|e| format!("invalid utf-8 in tree {}: {}", tree_hash.to_hex(), e))?;
+
+    let sep = "\0\0\n";
+    let sep_pos = body_str
+        .find(sep)
+        .ok_or_else(|| format!("tree {} missing section separator", tree_hash.to_hex()))?;
+
+    let meta_section = &body_str[..sep_pos];
+    let children_section = &body_str[sep_pos + sep.len()..];
+
+    let mut child_lines = children_section.lines();
+    let container_type_str = child_lines
+        .next()
+        .unwrap_or("none")
+        .trim();
+
+    let children_type = match container_type_str {
+        "attrs" => ChildrenType::Attributes,
+        "files" => ChildrenType::Files,
+        "none" => ChildrenType::None,
+        other => return Err(format!("unknown children type '{}' in tree {}", other, tree_hash.to_hex())),
+    };
+
+    let current_node = Node::new(node_id, children_type);
+    {
+        let mut cur = current_node.borrow_mut();
+        cur.self_hash = Some(*tree_hash);
+        cur.valid_self_hash = true;
+        cur.valid_child_hash = true;
+    }
+
+    // Parse meta entries
+    for line in meta_section.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let id_str = parts
+            .next()
+            .ok_or_else(|| format!("missing id in meta entry: '{}'", line))?;
+        let hash_str = parts
+            .next()
+            .ok_or_else(|| format!("missing hash in meta entry: '{}'", line))?;
+
+        let meta_id = buf16_from_hex(id_str)?;
+        let meta_hash = Hash::from_hex(hash_str)
+            .map_err(|e| format!("invalid meta hash '{}': {}", hash_str, e))?;
+
+        let meta_node = Node::new(meta_id, ChildrenType::None);
+        {
+            let mut m = meta_node.borrow_mut();
+            m.self_hash = Some(meta_hash);
+            m.valid_self_hash = true;
+            m.parent = Some(Rc::downgrade(&current_node));
+        }
+        current_node.borrow_mut().meta.insert(meta_id, meta_node);
+    }
+
+    // Parse children entries
+    for line in child_lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let id_str = parts
+            .next()
+            .ok_or_else(|| format!("missing id in child entry: '{}'", line))?;
+        let hash_str = parts
+            .next()
+            .ok_or_else(|| format!("missing hash in child entry: '{}'", line))?;
+
+        let child_id = buf16_from_hex(id_str)?;
+        let child_hash = Hash::from_hex(hash_str)
+            .map_err(|e| format!("invalid child hash '{}': {}", hash_str, e))?;
+
+        let (child_obj_type, _) = read_object_bytes_in(repo_root, &child_hash)?;
+        let child_node = match child_obj_type {
+            ObjectType::Tree => {
+                let node = load_tree_node_in(repo_root, &child_hash, child_id)?;
+                node.borrow_mut().parent = Some(Rc::downgrade(&current_node));
+                node
+            }
+            ObjectType::Blob => {
+                let node = Node::new(child_id, ChildrenType::None);
+                {
+                    let mut n = node.borrow_mut();
+                    n.self_hash = Some(child_hash);
+                    n.valid_self_hash = true;
+                    n.parent = Some(Rc::downgrade(&current_node));
+                }
+                node
+            }
+            other => {
+                return Err(format!(
+                    "unexpected child object type {:?} for hash {}",
+                    other,
+                    child_hash.to_hex()
+                ));
+            }
+        };
+
+        match &mut current_node.borrow_mut().children {
+            Children::Attributes(map) | Children::Files(map) => {
+                map.insert(child_id, child_node);
+            }
+            Children::None => {}
+        }
+    }
+
+    Ok(current_node)
 }
 
 pub fn save_tree_in(root: NodeRef, repo_root: &Path) -> Result<blake3::Hash, String> {
@@ -215,7 +421,13 @@ mod tests {
 
         // Verify the series object contents
         let series_bytes = fs::read(&series_obj_path).expect("read series obj");
-        let expected_series_body = format!("{}\n\0\0\n{}\n", meta_hash.to_hex(), file_blob_hash.to_hex());
+        let expected_series_body = format!(
+            "{} {}\n\0\0\nfiles\n{} {}\n",
+            hex_from_buf16(&[3u8; 16]),
+            meta_hash.to_hex(),
+            hex_from_buf16(&[2u8; 16]),
+            file_blob_hash.to_hex()
+        );
         let expected_series_header = format!("tree {}\0", expected_series_body.len());
         let mut expected_full = Vec::new();
         expected_full.extend_from_slice(expected_series_header.as_bytes());
@@ -289,12 +501,99 @@ mod tests {
         let body_str = String::from_utf8_lossy(&body);
 
         let expected_body = format!(
-            "{}\n{}\n\0\0\n{}\n{}\n",
+            "{} {}\n{} {}\n\0\0\nattrs\n{} {}\n{} {}\n",
+            hex_from_buf16(&[10u8; 16]),
             meta_a_hash.to_hex(),
+            hex_from_buf16(&[20u8; 16]),
             meta_b_hash.to_hex(),
+            hex_from_buf16(&[100u8; 16]),
             child_a_hash.to_hex(),
+            hex_from_buf16(&[200u8; 16]),
             child_b_hash.to_hex()
         );
         assert_eq!(body_str, expected_body);
+    }
+
+    #[test]
+    fn test_buf16_hex_roundtrip() {
+        let original = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ];
+        let hex = hex_from_buf16(&original);
+        assert_eq!(hex, "0123456789abcdeffedcba9876543210");
+        let parsed = buf16_from_hex(&hex).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_load_tree_from_commit_roundtrip() {
+        let repo = TempRepo::new("load_tree_roundtrip");
+
+        // Construct a tree with root -> series -> leaf_file and meta
+        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let series = Node::new([1u8; 16], ChildrenType::Files);
+        let leaf = Node::new([2u8; 16], ChildrenType::None);
+
+        let blob_content = b"sample leaf blob";
+        let blob_hash = hash_bytes(blob_content, ObjectType::Blob);
+        make_object_from_bytes_in(blob_content, blob_hash, ObjectType::Blob, &repo.path).unwrap();
+
+        leaf.borrow_mut().self_hash = Some(blob_hash);
+        leaf.borrow_mut().valid_self_hash = true;
+
+        let meta_content = b"sample meta json";
+        let meta_hash = hash_bytes(meta_content, ObjectType::Meta);
+        make_object_from_bytes_in(meta_content, meta_hash, ObjectType::Meta, &repo.path).unwrap();
+
+        let meta_node = Node::new([3u8; 16], ChildrenType::None);
+        meta_node.borrow_mut().self_hash = Some(meta_hash);
+        meta_node.borrow_mut().valid_self_hash = true;
+
+        series
+            .borrow_mut()
+            .meta
+            .insert([3u8; 16], Rc::clone(&meta_node));
+        Node::insert(&series, crate::core::tree::ChildType::Ref(Rc::clone(&leaf))).unwrap();
+        Node::insert(&root, crate::core::tree::ChildType::Ref(Rc::clone(&series))).unwrap();
+
+        let root_hash = save_tree_in(Rc::clone(&root), &repo.path).unwrap();
+
+        // Create a commit object pointing to root_hash
+        let commit_body = format!("{}\n\nfeat: test commit\n", root_hash.to_hex());
+        let commit_hash = hash_bytes(commit_body.as_bytes(), ObjectType::Commit);
+        make_object_from_bytes_in(
+            commit_body.as_bytes(),
+            commit_hash,
+            ObjectType::Commit,
+            &repo.path,
+        )
+        .unwrap();
+
+        // Load tree from commit hash
+        let loaded_tree =
+            load_tree_from_commit_in(&repo.path, &commit_hash).expect("load tree from commit");
+        assert_eq!(loaded_tree.root.borrow().id, [0u8; 16]);
+        assert_eq!(loaded_tree.root.borrow().self_hash, Some(root_hash));
+
+        // Verify child series exists with id [1u8; 16]
+        let loaded_series = match &loaded_tree.root.borrow().children {
+            Children::Attributes(map) => {
+                map.get(&[1u8; 16]).cloned().expect("series node exists")
+            }
+            _ => panic!("expected attributes children container"),
+        };
+        assert_eq!(loaded_series.borrow().id, [1u8; 16]);
+
+        // Verify meta on series exists
+        assert!(loaded_series.borrow().meta.contains_key(&[3u8; 16]));
+
+        // Verify leaf child exists on series
+        let loaded_leaf = match &loaded_series.borrow().children {
+            Children::Files(map) => map.get(&[2u8; 16]).cloned().expect("leaf node exists"),
+            _ => panic!("expected files children container"),
+        };
+        assert_eq!(loaded_leaf.borrow().id, [2u8; 16]);
+        assert_eq!(loaded_leaf.borrow().self_hash, Some(blob_hash));
     }
 }
