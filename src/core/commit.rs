@@ -450,4 +450,62 @@ mod tests {
         assert!(commit_2_str.contains(hex_1.as_str()), "commit 2 must reference commit 1 as parent");
         assert!(commit_2_str.contains("Second commit"), "commit 2 must contain its message");
     }
+
+    #[test]
+    fn test_qomra_e2e_workflow_generate_add_commit_delete_add_commit() {
+        use crate::core::add::add_in;
+        use crate::tester::generate::sample::qomra;
+
+        let repo = TempRepo::new("qomra_e2e");
+
+        // 1. Generate Qomra dataset with tester
+        qomra(&repo.path, &[], 1, 1, 1, 1);
+
+        let target_file = repo.path.join(
+            "segmentation/model_v1/subject_001/study_001/series_001/instance_001_seg.nii.gz",
+        );
+        assert!(target_file.is_file(), "generated target file must exist");
+
+        // 2. Add all files
+        add_in(&repo.path).expect("first add_in should succeed");
+
+        // 3. Commit initial state
+        let commit_1 = commit_with_message_in(&repo.path, "feat: initial qomra commit")
+            .expect("first commit should succeed");
+        let hex_1 = commit_1.to_hex();
+        assert_eq!(load_head_hash_in(&repo.path).unwrap(), Some(hex_1.to_string()));
+
+        // 4. Delete a file
+        fs::remove_file(&target_file).expect("remove target file");
+        assert!(!target_file.exists());
+
+        // 5. Add after delete (prunes node from tree)
+        add_in(&repo.path).expect("second add_in should succeed");
+
+        // 6. Commit after delete
+        let commit_2 = commit_with_message_in(&repo.path, "remove model_v1 segmentation")
+            .expect("second commit should succeed");
+        let hex_2 = commit_2.to_hex();
+        assert_ne!(hex_1, hex_2, "commits should have different hashes");
+        assert_eq!(load_head_hash_in(&repo.path).unwrap(), Some(hex_2.to_string()));
+
+        // 7. Verify parent linkage and commit object on disk
+        let obj_2_path = repo
+            .path
+            .join(".git-med/objects")
+            .join(&hex_2[..2])
+            .join(&hex_2[2..]);
+        assert!(obj_2_path.is_file());
+
+        let commit_2_bytes = fs::read(&obj_2_path).unwrap();
+        let commit_2_str = String::from_utf8_lossy(&commit_2_bytes);
+        assert!(
+            commit_2_str.contains(hex_1.as_str()),
+            "commit 2 parent must point to commit 1"
+        );
+        assert!(
+            commit_2_str.contains("remove model_v1 segmentation"),
+            "commit 2 must contain commit message"
+        );
+    }
 }
