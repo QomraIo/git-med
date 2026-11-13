@@ -1,13 +1,11 @@
 use crate::core::tree::load_or_init_tree;
-use crate::core::tree::{ChildrenType, NodeRef, Tree, get_or_insert_child, get_or_insert_meta};
+use crate::core::tree::{ChildrenType, NodeRef, get_or_insert_child, get_or_insert_meta};
 use crate::views::qomra::is_metafile;
 use crate::views::traits::View;
-use crate::views::utils::bytes2buf128;
 use crate::views::{self, get_view_in};
 use regex::Regex;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
@@ -130,7 +128,7 @@ fn index_file_with_view(
     let attrs = view.index(rel_path);
     let file_id = rel_path
         .file_name()
-        .map(|n| bytes2buf128(n.as_bytes()))
+        .and_then(|n| n.to_str())
         .ok_or_else(|| format!("missing file name for {}", rel_path.display()))?;
     let err_msg = || format!("failed to index {}", rel_path.display());
 
@@ -140,7 +138,7 @@ fn index_file_with_view(
         return Ok(());
     };
     let task_node =
-        get_or_insert_child(root, task_id, ChildrenType::Attributes).map_err(|_| err_msg())?;
+        get_or_insert_child(root, &task_id, ChildrenType::Attributes).map_err(|_| err_msg())?;
 
     let Some(source_id) = attrs.source else {
         let meta_node = get_or_insert_meta(&task_node, file_id);
@@ -148,7 +146,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node]);
         return Ok(());
     };
-    let source_node = get_or_insert_child(&task_node, source_id, ChildrenType::Attributes)
+    let source_node = get_or_insert_child(&task_node, &source_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(subject_id) = attrs.subject else {
@@ -158,7 +156,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node, &source_node]);
         return Ok(());
     };
-    let subject_node = get_or_insert_child(&source_node, subject_id, ChildrenType::Attributes)
+    let subject_node = get_or_insert_child(&source_node, &subject_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(study_id) = attrs.study else {
@@ -168,7 +166,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node, &source_node, &subject_node]);
         return Ok(());
     };
-    let study_node = get_or_insert_child(&subject_node, study_id, ChildrenType::Attributes)
+    let study_node = get_or_insert_child(&subject_node, &study_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(series_id) = attrs.series else {
@@ -187,7 +185,7 @@ fn index_file_with_view(
         return Ok(());
     };
     let series_node =
-        get_or_insert_child(&study_node, series_id, ChildrenType::Files).map_err(|_| err_msg())?;
+        get_or_insert_child(&study_node, &series_id, ChildrenType::Files).map_err(|_| err_msg())?;
 
     let Some(instance_id) = attrs.instance else {
         let meta_node = get_or_insert_meta(&series_node, file_id);
@@ -212,7 +210,7 @@ fn index_file_with_view(
         return Ok(());
     };
 
-    let instance_node = get_or_insert_child(&series_node, instance_id, ChildrenType::None)
+    let instance_node = get_or_insert_child(&series_node, &instance_id, ChildrenType::None)
         .map_err(|_| err_msg())?;
     let target_node = if is_metafile(rel_path) {
         get_or_insert_meta(&instance_node, file_id)
@@ -330,11 +328,10 @@ pub fn add(_args: &Vec<String>) {
 mod tests {
     use super::*;
     use crate::core::init::init_at;
-    use crate::core::tree::Children;
+    use crate::core::tree::{Children, Tree};
     use crate::files::types::ObjectType;
     use crate::files::utils::hash;
     use crate::tester::generate::sample::qomra;
-    use crate::views::utils::string2buf128;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -367,18 +364,16 @@ mod tests {
     }
 
     fn get_child(parent: &NodeRef, name: &str) -> Option<NodeRef> {
-        let key = string2buf128(name);
         let guard = parent.borrow();
         match &guard.children {
-            Children::Attributes(map) => map.get(&key).cloned(),
-            Children::Files(map) => map.get(&key).cloned(),
+            Children::Attributes(map) => map.get(name).cloned(),
+            Children::Files(map) => map.get(name).cloned(),
             Children::None => None,
         }
     }
 
     fn get_meta(parent: &NodeRef, filename: &str) -> Option<NodeRef> {
-        let key = bytes2buf128(filename.as_bytes());
-        parent.borrow().meta.get(&key).cloned()
+        parent.borrow().meta.get(filename).cloned()
     }
 
     fn expected_object_file(

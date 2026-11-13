@@ -124,7 +124,7 @@ pub fn branch_in(repo_root: &Path, branch_name: &str) -> Result<(), String> {
     let tree = if let Some(commit_hash) = commit_for_tree {
         load_tree_from_commit_in(repo_root, &commit_hash)?
     } else {
-        Tree::new([0u8; 16])
+        Tree::new("")
     };
 
     let index_path = git_med_dir.join("index");
@@ -281,6 +281,10 @@ mod tests {
         );
         let tree_main = crate::core::tree::load_or_fail_tree(&repo.path.join(".git-med/index")).unwrap();
         assert_eq!(tree_main.root.borrow().self_hash, Some(tree_1_hash));
+        assert!(
+            target_file.is_file(),
+            "target file must be restored to disk by view.write when switching to main"
+        );
 
         // Switch back to feature
         branch_in(&repo.path, "feature").expect("switch to feature");
@@ -320,7 +324,7 @@ mod tests {
         let commit_hash = commit_with_message_in(&repo.path, "commit for helper test").unwrap();
 
         let tree = load_tree_from_commit_in(&repo.path, &commit_hash).expect("load tree");
-        assert_eq!(tree.root.borrow().id, [0u8; 16]);
+        assert_eq!(tree.root.borrow().id, "");
         assert!(tree.root.borrow().self_hash.is_some());
     }
 }

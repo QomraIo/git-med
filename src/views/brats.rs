@@ -1,7 +1,7 @@
 use crate::core::tree::NodeRef;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
-use crate::views::utils::{get_name, string2buf128};
+use crate::views::utils::get_name;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ impl View for Brats {
             .unwrap_or_default();
         let instance = get_name(&instance_path);
 
-        let series = Some(string2buf128(&format!("series_{}", instance_str)));
+        let series = Some(format!("series_{}", instance_str));
 
         let next_path = ancestors.next();
         let next_str = next_path
@@ -34,7 +34,7 @@ impl View for Brats {
             (subject, study)
         } else {
             let subject = get_name(&next_path);
-            let study = Some(string2buf128(&format!("study_{}", next_str)));
+            let study = Some(format!("study_{}", next_str));
             (subject, study)
         };
 
@@ -52,13 +52,13 @@ impl View for Brats {
             .map(String::from)
             .collect();
 
-        let source = Some(string2buf128(
-            others.get(0).map(String::as_str).unwrap_or_default(),
-        ));
+        let source = Some(
+            others.get(0).map(String::as_str).unwrap_or_default().to_string(),
+        );
         let task = Some(if instance_str.contains("_seg") {
-            string2buf128("segmentation")
+            "segmentation".to_string()
         } else {
-            string2buf128(others.get(1).map(String::as_str).unwrap_or_default())
+            others.get(1).map(String::as_str).unwrap_or_default().to_string()
         });
 
         ViewAttributesIndex {
@@ -84,60 +84,60 @@ impl View for Brats {
         )
     }
 
-    fn index_root(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    fn index_root(&self, _path: &Path, _node: &NodeRef) -> Result<(), ()> {
         Err(())
     }
 
-    fn index_task(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    fn index_task(&self, _path: &Path, _node: &NodeRef) -> Result<(), ()> {
         Err(())
     }
 
-    fn index_source(&self, path: &Path, node: &NodeRef, task_id: &[u8; 16]) -> Result<(), ()> {
+    fn index_source(&self, _path: &Path, _node: &NodeRef, _task_id: &str) -> Result<(), ()> {
         Err(())
     }
 
     fn index_subject(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_study(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_series(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
+        _study_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_instance(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
-        series_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
+        _study_id: &str,
+        _series_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
@@ -200,18 +200,18 @@ mod tests {
         let mut brats = Brats::default();
         let brats = brats.index(&file_path);
 
-        assert_eq!(brats.subject, Some(string2buf128("subject_001")));
-        assert_eq!(brats.study, Some(string2buf128("study_001")));
+        assert_eq!(brats.subject.as_deref(), Some("subject_001"));
+        assert_eq!(brats.study.as_deref(), Some("study_001"));
         assert_eq!(
-            brats.series,
-            Some(string2buf128("series_subject_001_study_001_t1.nii.gz"))
+            brats.series.as_deref(),
+            Some("series_subject_001_study_001_t1.nii.gz")
         );
         assert_eq!(
-            brats.instance,
-            Some(string2buf128("subject_001_study_001_t1.nii.gz"))
+            brats.instance.as_deref(),
+            Some("subject_001_study_001_t1.nii.gz")
         );
-        assert_eq!(brats.source, Some(string2buf128("clinic")));
-        assert_eq!(brats.task, Some(string2buf128("data")));
+        assert_eq!(brats.source.as_deref(), Some("clinic"));
+        assert_eq!(brats.task.as_deref(), Some("data"));
     }
 
     #[test]
@@ -226,18 +226,18 @@ mod tests {
         let mut brats = Brats::default();
         let brats = brats.index(&file_path);
 
-        assert_eq!(brats.subject, Some(string2buf128("subject_001")));
-        assert_eq!(brats.study, Some(string2buf128("study_001")));
+        assert_eq!(brats.subject.as_deref(), Some("subject_001"));
+        assert_eq!(brats.study.as_deref(), Some("study_001"));
         assert_eq!(
-            brats.series,
-            Some(string2buf128("series_subject_001_study_001_seg.nii.gz"))
+            brats.series.as_deref(),
+            Some("series_subject_001_study_001_seg.nii.gz")
         );
         assert_eq!(
-            brats.instance,
-            Some(string2buf128("subject_001_study_001_seg.nii.gz"))
+            brats.instance.as_deref(),
+            Some("subject_001_study_001_seg.nii.gz")
         );
-        assert_eq!(brats.source, Some(string2buf128("consensus")));
-        assert_eq!(brats.task, Some(string2buf128("segmentation")));
+        assert_eq!(brats.source.as_deref(), Some("consensus"));
+        assert_eq!(brats.task.as_deref(), Some("segmentation"));
     }
 
     #[test]

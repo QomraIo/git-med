@@ -27,9 +27,9 @@ pub enum ChildrenType {
 }
 
 pub enum Children {
-    Attributes(BTreeMap<[u8; 16], NodeRef>), // attribute has other attributes
-    Files(BTreeMap<[u8; 16], NodeRef>),      // attribute has files
-    None,                                    // file has no sub
+    Attributes(BTreeMap<String, NodeRef>), // attribute has other attributes
+    Files(BTreeMap<String, NodeRef>),      // attribute has files
+    None,                                  // file has no sub
 }
 
 impl std::fmt::Debug for Children {
@@ -49,10 +49,10 @@ impl std::fmt::Debug for Children {
 pub type NodeMetadata = FileMetadata;
 
 pub struct Node {
-    pub id: [u8; 16],
+    pub id: String,
 
     pub children: Children,
-    pub meta: BTreeMap<[u8; 16], NodeRef>,
+    pub meta: BTreeMap<String, NodeRef>,
     pub parent: Option<WeakNodeRef>, // root has no parent
 
     pub visited: bool,
@@ -87,20 +87,20 @@ impl std::fmt::Debug for Node {
 }
 
 pub enum ChildType {
-    Id([u8; 16]),
+    Id(String),
     Ref(NodeRef),
 }
 
 impl Node {
     /// Create a new detached node with the specified child container type.
-    pub fn new(id: [u8; 16], children_type: ChildrenType) -> NodeRef {
+    pub fn new(id: impl Into<String>, children_type: ChildrenType) -> NodeRef {
         let children = match children_type {
             ChildrenType::Attributes => Children::Attributes(BTreeMap::new()),
             ChildrenType::Files => Children::Files(BTreeMap::new()),
             ChildrenType::None => Children::None,
         };
         Rc::new(RefCell::new(Node {
-            id,
+            id: id.into(),
             children,
             meta: BTreeMap::new(),
             parent: None,
@@ -159,7 +159,7 @@ impl Node {
         let child_id = {
             let mut child_node = child_ref.borrow_mut();
             child_node.parent = Some(Rc::downgrade(parent_ref));
-            child_node.id
+            child_node.id.clone()
         };
 
         if let Some(old_child) = map.insert(child_id, Rc::clone(&child_ref)) {
@@ -261,23 +261,23 @@ impl Node {
 
 fn get_or_insert_in_map(
     parent_ref: &NodeRef,
-    map: &mut BTreeMap<[u8; 16], NodeRef>,
-    id: [u8; 16],
+    map: &mut BTreeMap<String, NodeRef>,
+    id: &str,
     children_type: ChildrenType,
 ) -> NodeRef {
-    if let Some(node) = map.get(&id) {
+    if let Some(node) = map.get(id) {
         return Rc::clone(node);
     }
     let child = Node::new(id, children_type);
     child.borrow_mut().parent = Some(Rc::downgrade(parent_ref));
-    map.insert(id, Rc::clone(&child));
+    map.insert(id.to_string(), Rc::clone(&child));
     child
 }
 
 /// Look up a child by `id` under `parent_ref`, or insert a new node with `children_type`.
 pub fn get_or_insert_child(
     parent_ref: &NodeRef,
-    id: [u8; 16],
+    id: &str,
     children_type: ChildrenType,
 ) -> Result<NodeRef, ()> {
     let mut parent = parent_ref.borrow_mut();
@@ -290,7 +290,7 @@ pub fn get_or_insert_child(
 }
 
 /// Look up a metadata file node by `id` in `parent_ref.meta`, or insert a leaf node if absent.
-pub fn get_or_insert_meta(parent_ref: &NodeRef, id: [u8; 16]) -> NodeRef {
+pub fn get_or_insert_meta(parent_ref: &NodeRef, id: &str) -> NodeRef {
     let mut parent = parent_ref.borrow_mut();
     get_or_insert_in_map(parent_ref, &mut parent.meta, id, ChildrenType::None)
 }
@@ -329,9 +329,9 @@ pub struct Tree {
 
 impl Tree {
     /// Create a new tree with a given root ID
-    pub fn new(root_id: [u8; 16]) -> Self {
+    pub fn new(root_id: impl Into<String>) -> Self {
         Self {
-            root: Node::new(root_id, ChildrenType::Attributes),
+            root: Node::new(root_id.into(), ChildrenType::Attributes),
         }
     }
 
@@ -598,7 +598,7 @@ fn read_opt_file_metadata<R: Read>(
 
 fn write_children_map<W: Write>(
     disc: u8,
-    map: &BTreeMap<[u8; 16], NodeRef>,
+    map: &BTreeMap<String, NodeRef>,
     writer: &mut W,
     depth: usize,
 ) -> Result<(), TreeError> {
@@ -617,17 +617,17 @@ fn read_children_map<R: Read>(
     reader: &mut R,
     parent: &NodeRef,
     depth: usize,
-) -> Result<BTreeMap<[u8; 16], NodeRef>, TreeError> {
+) -> Result<BTreeMap<String, NodeRef>, TreeError> {
     let mut count_buf = [0u8; 4];
     reader.read_exact(&mut count_buf)?;
     let count = u32::from_be_bytes(count_buf) as usize;
     let mut map = BTreeMap::new();
     for _ in 0..count {
         let child = deserialize_node(reader, Some(parent), depth + 1)?;
-        let child_id = child.borrow().id;
-        if map.insert(child_id, child).is_some() {
+        let child_id = child.borrow().id.clone();
+        if map.insert(child_id.clone(), child).is_some() {
             return Err(TreeError::CorruptedData(format!(
-                "duplicate child id in serialized node: {:02x?}",
+                "duplicate child id in serialized node: {}",
                 child_id
             )));
         }
@@ -656,8 +656,13 @@ fn serialize_node_internal<W: Write>(
         )));
     }
 
-    // 1. Write id (16 bytes)
-    writer.write_all(&node.id)?;
+    // 1. Write id (u16 length + UTF-8 bytes)
+    let id_bytes = node.id.as_bytes();
+    let id_len = u16::try_from(id_bytes.len()).map_err(|_| {
+        TreeError::CorruptedData(format!("node id length exceeds u16::MAX: {}", id_bytes.len()))
+    })?;
+    writer.write_all(&id_len.to_be_bytes())?;
+    writer.write_all(id_bytes)?;
 
     // 2. Write flags (1 byte)
     let mut flags = 0u8;
@@ -733,9 +738,15 @@ fn deserialize_node<R: Read>(
         )));
     }
 
-    // 1. Read id
-    let mut id = [0u8; 16];
-    reader.read_exact(&mut id)?;
+    // 1. Read id (u16 length + UTF-8 bytes)
+    let mut id_len_buf = [0u8; 2];
+    reader.read_exact(&mut id_len_buf)?;
+    let id_len = u16::from_be_bytes(id_len_buf) as usize;
+    let mut id_buf = vec![0u8; id_len];
+    reader.read_exact(&mut id_buf)?;
+    let id = String::from_utf8(id_buf).map_err(|e| {
+        TreeError::CorruptedData(format!("invalid UTF-8 in node id: {}", e))
+    })?;
 
     // 2. Read flags
     let mut flags_buf = [0u8; 1];
@@ -828,7 +839,7 @@ pub fn load_or_fail_tree(index_path: &Path) -> Result<Tree, String> {
 }
 
 pub fn load_or_init_tree(index_path: &Path) -> Result<Tree, String> {
-    load_or_fail_tree(index_path).or_else(|_| Ok(Tree::new([0u8; 16])))
+    load_or_fail_tree(index_path).or_else(|_| Ok(Tree::new("")))
 }
 
 #[cfg(test)]
@@ -865,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_node_new_defaults_and_tree_new() {
-        let node = Node::new([3u8; 16], ChildrenType::None);
+        let node = Node::new("3", ChildrenType::None);
         {
             let n = node.borrow();
             assert!(!n.visited);
@@ -886,18 +897,18 @@ mod tests {
             assert!(matches!(n.children, Children::None));
         }
 
-        let files_node = Node::new([5u8; 16], ChildrenType::Files);
+        let files_node = Node::new("5", ChildrenType::Files);
         assert!(matches!(files_node.borrow().children, Children::Files(ref m) if m.is_empty()));
 
-        let tree = Tree::new([4u8; 16]);
+        let tree = Tree::new("4");
         let root = tree.root.borrow();
-        assert_eq!(root.id, [4u8; 16]);
+        assert_eq!(root.id, "4");
         assert!(matches!(root.children, Children::Attributes(ref m) if m.is_empty()));
     }
 
     #[test]
     fn test_single_node_stream_roundtrip() {
-        let node_id = [1u8; 16];
+        let node_id = "1";
         let self_hash = blake3::hash(b"self_hash_123");
         let meta_hash = blake3::hash(b"meta_hash_456");
         let child_hash = blake3::hash(b"child_hash_789");
@@ -961,15 +972,15 @@ mod tests {
 
     #[test]
     fn test_tree_hierarchy_and_parent_reconstruction() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let root = Node::new("0", ChildrenType::Attributes);
 
-        let task_id = [10u8; 16];
-        let task_node = Node::insert(&root, ChildType::Id(task_id)).expect("Failed to insert task");
+        let task_id = "10";
+        let task_node = Node::insert(&root, ChildType::Id(task_id.to_string())).expect("Failed to insert task");
         task_node.borrow_mut().children = Children::Files(BTreeMap::new());
 
-        let file_id = [20u8; 16];
+        let file_id = "20";
         let _file_node =
-            Node::insert(&task_node, ChildType::Id(file_id)).expect("Failed to insert file");
+            Node::insert(&task_node, ChildType::Id(file_id.to_string())).expect("Failed to insert file");
 
         let tree = Tree::from_root(Rc::clone(&root));
         let mut buffer = Vec::new();
@@ -978,19 +989,19 @@ mod tests {
         let restored_tree = Tree::read_from(&mut &buffer[..]).expect("Read from buffer failed");
         let restored_root = restored_tree.root;
 
-        assert_eq!(restored_root.borrow().id, [0u8; 16]);
+        assert_eq!(restored_root.borrow().id, "0");
         assert!(restored_root.borrow().parent().is_none());
 
         let restored_task = match &restored_root.borrow().children {
-            Children::Attributes(map) => Rc::clone(map.get(&task_id).expect("task node missing")),
+            Children::Attributes(map) => Rc::clone(map.get(task_id).expect("task node missing")),
             _ => panic!("Expected Children::Attributes on root"),
         };
 
         let task_parent = restored_task.borrow().parent().expect("task has no parent");
-        assert_eq!(task_parent.borrow().id, [0u8; 16]);
+        assert_eq!(task_parent.borrow().id, "0");
 
         let restored_file = match &restored_task.borrow().children {
-            Children::Files(map) => Rc::clone(map.get(&file_id).expect("file node missing")),
+            Children::Files(map) => Rc::clone(map.get(file_id).expect("file node missing")),
             _ => panic!("Expected Children::Files on task"),
         };
 
@@ -1005,25 +1016,25 @@ mod tests {
         let nested_dir = temp_dir.path.join("nested");
         let file_path = nested_dir.join("test_tree.bin");
 
-        let root = Node::new([99u8; 16], ChildrenType::Attributes);
-        Node::insert(&root, ChildType::Id([1u8; 16])).unwrap();
-        Node::insert(&root, ChildType::Id([2u8; 16])).unwrap();
+        let root = Node::new("99", ChildrenType::Attributes);
+        Node::insert(&root, ChildType::Id("1".to_string())).unwrap();
+        Node::insert(&root, ChildType::Id("2".to_string())).unwrap();
 
         let tree = Tree::from_root(root);
         tree.save(&file_path).expect("Failed to save tree to file");
         let first_len = std::fs::metadata(&file_path).unwrap().len();
 
         let loaded = Tree::load(&file_path).expect("Failed to load tree from file");
-        assert_eq!(loaded.root.borrow().id, [99u8; 16]);
+        assert_eq!(loaded.root.borrow().id, "99");
 
         // Overwrite with a smaller tree directly and confirm truncation + no temp files.
-        let smaller = Tree::from_root(Node::new([77u8; 16], ChildrenType::None));
+        let smaller = Tree::from_root(Node::new("77", ChildrenType::None));
         smaller.save(&file_path).expect("Failed to overwrite tree");
         let second_len = std::fs::metadata(&file_path).unwrap().len();
         assert!(second_len < first_len);
 
         let reloaded = Tree::load(&file_path).expect("Failed to reload overwritten tree");
-        assert_eq!(reloaded.root.borrow().id, [77u8; 16]);
+        assert_eq!(reloaded.root.borrow().id, "77");
         assert!(matches!(reloaded.root.borrow().children, Children::None));
 
         let entries: Vec<_> = std::fs::read_dir(&nested_dir)
@@ -1065,7 +1076,7 @@ mod tests {
 
     #[test]
     fn test_metadata_timestamp_roundtrip() {
-        let node = Node::new([5u8; 16], ChildrenType::None);
+        let node = Node::new("5", ChildrenType::None);
         let test_time = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
         {
             let mut n = node.borrow_mut();
@@ -1119,7 +1130,7 @@ mod tests {
         assert_eq!(l.draft_meta_metadata.as_ref().unwrap().size, Some(20));
 
         if let Some(pre_epoch) = UNIX_EPOCH.checked_sub(Duration::from_secs(10)) {
-            let pre_node = Node::new([6u8; 16], ChildrenType::None);
+            let pre_node = Node::new("6", ChildrenType::None);
             pre_node.borrow_mut().node_metadata.atime = pre_epoch;
             let mut pre_buf = Vec::new();
             Tree::from_root(pre_node).write_to(&mut pre_buf).unwrap();
@@ -1130,7 +1141,7 @@ mod tests {
 
     #[test]
     fn test_child_hash_none_and_flags_roundtrip() {
-        let node = Node::new([6u8; 16], ChildrenType::None);
+        let node = Node::new("6", ChildrenType::None);
         {
             let mut n = node.borrow_mut();
             n.child_hash = None;
@@ -1158,7 +1169,7 @@ mod tests {
 
     #[test]
     fn test_empty_attributes_and_files_roundtrip() {
-        let attr_node = Node::new([7u8; 16], ChildrenType::Attributes);
+        let attr_node = Node::new("7", ChildrenType::Attributes);
         let mut attr_buf = Vec::new();
         Tree::from_root(attr_node).write_to(&mut attr_buf).unwrap();
         let loaded_attr = Tree::read_from(&mut &attr_buf[..]).unwrap();
@@ -1167,7 +1178,7 @@ mod tests {
             Children::Attributes(map) if map.is_empty()
         ));
 
-        let files_node = Node::new([8u8; 16], ChildrenType::Files);
+        let files_node = Node::new("8", ChildrenType::Files);
         let mut files_buf = Vec::new();
         Tree::from_root(files_node)
             .write_to(&mut files_buf)
@@ -1181,13 +1192,13 @@ mod tests {
 
     #[test]
     fn test_multiple_siblings_ordering() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let root = Node::new("0", ChildrenType::Attributes);
 
-        let unsorted_ids: Vec<[u8; 16]> = [5u8, 1, 3, 2, 4].into_iter().map(|i| [i; 16]).collect();
+        let unsorted_ids: Vec<&str> = vec!["5", "1", "3", "2", "4"];
         for id in &unsorted_ids {
-            Node::insert(&root, ChildType::Id(*id)).unwrap();
+            Node::insert(&root, ChildType::Id((*id).to_string())).unwrap();
         }
-        let expected_sorted: Vec<[u8; 16]> = (1u8..=5).map(|i| [i; 16]).collect();
+        let expected_sorted: Vec<String> = vec!["1", "2", "3", "4", "5"].into_iter().map(String::from).collect();
 
         let mut buf = Vec::new();
         Tree::from_root(Rc::clone(&root))
@@ -1197,7 +1208,7 @@ mod tests {
 
         match &loaded.root.borrow().children {
             Children::Attributes(map) => {
-                let loaded_ids: Vec<[u8; 16]> = map.keys().cloned().collect();
+                let loaded_ids: Vec<String> = map.keys().cloned().collect();
                 assert_eq!(loaded_ids, expected_sorted);
             }
             _ => panic!("Expected Attributes"),
@@ -1220,8 +1231,8 @@ mod tests {
 
     #[test]
     fn test_truncated_file() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
-        let child = Node::insert(&root, ChildType::Id([1u8; 16])).unwrap();
+        let root = Node::new("0", ChildrenType::Attributes);
+        let child = Node::insert(&root, ChildType::Id("1".to_string())).unwrap();
         child.borrow_mut().self_hash = Some(blake3::hash(b"child"));
 
         let mut buf = Vec::new();
@@ -1239,7 +1250,7 @@ mod tests {
 
     #[test]
     fn test_trailing_bytes_rejected_by_tree_read_from() {
-        let node = Node::new([0u8; 16], ChildrenType::None);
+        let node = Node::new("0", ChildrenType::None);
         let mut buf = Vec::new();
         Tree::from_root(node).write_to(&mut buf).unwrap();
         buf.push(0x00);
@@ -1250,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_invalid_children_discriminant() {
-        let node = Node::new([0u8; 16], ChildrenType::None);
+        let node = Node::new("0", ChildrenType::None);
         let mut buf = Vec::new();
         Tree::from_root(node).write_to(&mut buf).unwrap();
 
@@ -1274,12 +1285,12 @@ mod tests {
 
     #[test]
     fn test_invalid_size_tag() {
-        let node = Node::new([0u8; 16], ChildrenType::None);
+        let node = Node::new("0", ChildrenType::None);
         let mut buf = Vec::new();
         Tree::from_root(node).write_to(&mut buf).unwrap();
 
-        // 12 (header) + 16 (id) + 1 (flags) + 24 (node_metadata atime+mtime)
-        let size_tag_offset = 12 + 16 + 1 + 24;
+        // 12 (header) + 2 (id len) + 1 (id "0") + 1 (flags) + 24 (node_metadata atime+mtime)
+        let size_tag_offset = 12 + 2 + 1 + 1 + 24;
         assert_eq!(buf[size_tag_offset], 0u8);
         buf[size_tag_offset] = 0x05;
 
@@ -1289,12 +1300,12 @@ mod tests {
 
     #[test]
     fn test_invalid_and_overflow_timestamps() {
-        let node = Node::new([0u8; 16], ChildrenType::None);
+        let node = Node::new("0", ChildrenType::None);
         let mut base_buf = Vec::new();
         Tree::from_root(node).write_to(&mut base_buf).unwrap();
 
-        // 12 (header) + 16 (id) + 1 (flags) = start of node_metadata.atime (secs: 8, nanos: 4)
-        let atime_secs_offset = 12 + 16 + 1;
+        // 12 (header) + 2 (id len) + 1 (id "0") + 1 (flags) = start of node_metadata.atime (secs: 8, nanos: 4)
+        let atime_secs_offset = 12 + 2 + 1 + 1;
         let atime_nanos_offset = atime_secs_offset + 8;
 
         let mut bad_nanos = base_buf.clone();
@@ -1316,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_child_id_in_stream_rejected() {
-        let child_id = [42u8; 16];
+        let child_id = "42";
         let child = Node::new(child_id, ChildrenType::None);
         let mut child_bytes = Vec::new();
         child.borrow().write_subtree(&mut child_bytes).unwrap();
@@ -1324,8 +1335,11 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend_from_slice(TREE_MAGIC);
         stream.extend_from_slice(&TREE_VERSION.to_be_bytes());
-        // Root node: id + flags + two empty FileMetadata + children(disc 1, count 2) + meta(0)
-        stream.extend_from_slice(&[0u8; 16]);
+        // Root node: id len (2) + id ("0") + flags + two empty FileMetadata + children(disc 1, count 2) + meta(0)
+        let root_id = "0";
+        let root_bytes = root_id.as_bytes();
+        stream.extend_from_slice(&(root_bytes.len() as u16).to_be_bytes());
+        stream.extend_from_slice(root_bytes);
         stream.push(0u8);
         write_file_metadata(&NodeMetadata::default(), &mut stream).unwrap();
         write_file_metadata(&NodeMetadata::default(), &mut stream).unwrap();
@@ -1341,10 +1355,10 @@ mod tests {
 
     #[test]
     fn test_excessive_tree_depth_rejected() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
+        let root = Node::new("0", ChildrenType::Attributes);
         let mut current = Rc::clone(&root);
         for d in 1..=(MAX_TREE_DEPTH + 1) {
-            let next = Node::new([d as u8; 16], ChildrenType::Attributes);
+            let next = Node::new(d.to_string(), ChildrenType::Attributes);
             Node::insert(&current, ChildType::Ref(Rc::clone(&next))).unwrap();
             current = next;
         }
@@ -1358,7 +1372,10 @@ mod tests {
         deep_stream.extend_from_slice(TREE_MAGIC);
         deep_stream.extend_from_slice(&TREE_VERSION.to_be_bytes());
         for d in 0..=(MAX_TREE_DEPTH + 1) {
-            deep_stream.extend_from_slice(&[d as u8; 16]);
+            let id_str = d.to_string();
+            let id_bytes = id_str.as_bytes();
+            deep_stream.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
+            deep_stream.extend_from_slice(id_bytes);
             deep_stream.push(0u8);
             write_file_metadata(&NodeMetadata::default(), &mut deep_stream).unwrap();
             write_file_metadata(&NodeMetadata::default(), &mut deep_stream).unwrap();
@@ -1376,7 +1393,7 @@ mod tests {
 
     #[test]
     fn test_write_subtree_and_load_subtree() {
-        let node = Node::new([42u8; 16], ChildrenType::None);
+        let node = Node::new("42", ChildrenType::None);
         let expected_hash = blake3::hash(b"subtree_hash");
         node.borrow_mut().self_hash = Some(expected_hash);
 
@@ -1384,15 +1401,15 @@ mod tests {
         node.borrow().write_subtree(&mut buf).unwrap();
 
         let loaded = Node::load_subtree(&mut &buf[..], None).unwrap();
-        assert_eq!(loaded.borrow().id, [42u8; 16]);
+        assert_eq!(loaded.borrow().id, "42");
         assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
         assert!(loaded.borrow().parent().is_none());
     }
 
     #[test]
     fn test_load_subtree_with_parent() {
-        let parent = Node::new([1u8; 16], ChildrenType::Attributes);
-        let child = Node::new([2u8; 16], ChildrenType::None);
+        let parent = Node::new("1", ChildrenType::Attributes);
+        let child = Node::new("2", ChildrenType::None);
         let expected_hash = blake3::hash(b"child_hash");
         child.borrow_mut().self_hash = Some(expected_hash);
 
@@ -1400,18 +1417,18 @@ mod tests {
         child.borrow().write_subtree(&mut buf).unwrap();
 
         let loaded = Node::load_subtree(&mut &buf[..], Some(&parent)).unwrap();
-        assert_eq!(loaded.borrow().id, [2u8; 16]);
+        assert_eq!(loaded.borrow().id, "2");
         assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
         let loaded_parent = loaded.borrow().parent().expect("should have parent");
-        assert_eq!(loaded_parent.borrow().id, [1u8; 16]);
+        assert_eq!(loaded_parent.borrow().id, "1");
     }
 
     #[test]
     fn test_multi_node_subtree_and_sequential_stream() {
-        let sub1 = Node::new([10u8; 16], ChildrenType::Files);
-        Node::insert(&sub1, ChildType::Id([11u8; 16])).unwrap();
+        let sub1 = Node::new("10", ChildrenType::Files);
+        Node::insert(&sub1, ChildType::Id("11".to_string())).unwrap();
 
-        let sub2 = Node::new([20u8; 16], ChildrenType::None);
+        let sub2 = Node::new("20", ChildrenType::None);
 
         let mut stream = Vec::new();
         sub1.borrow().write_subtree(&mut stream).unwrap();
@@ -1424,12 +1441,12 @@ mod tests {
 
         match &loaded1.borrow().children {
             Children::Files(map) => {
-                let child = map.get(&[11u8; 16]).expect("missing subtree child");
-                assert_eq!(child.borrow().parent().unwrap().borrow().id, [10u8; 16]);
+                let child = map.get("11").expect("missing subtree child");
+                assert_eq!(child.borrow().parent().unwrap().borrow().id, "10");
             }
             _ => panic!("Expected Children::Files"),
         }
-        assert_eq!(loaded2.borrow().id, [20u8; 16]);
+        assert_eq!(loaded2.borrow().id, "20");
     }
 
     #[test]
@@ -1437,7 +1454,7 @@ mod tests {
         let temp_dir = TestTempDir::new("node_file");
         let file_path = temp_dir.path.join("node_tree.bin");
 
-        let node = Node::new([88u8; 16], ChildrenType::None);
+        let node = Node::new("88", ChildrenType::None);
         let expected_hash = blake3::hash(b"node_save_test");
         node.borrow_mut().self_hash = Some(expected_hash);
 
@@ -1446,30 +1463,30 @@ mod tests {
         assert_eq!(loaded.borrow().self_hash, Some(expected_hash));
 
         // Direct overwrite on the same path.
-        let replacement = Node::new([89u8; 16], ChildrenType::None);
+        let replacement = Node::new("89", ChildrenType::None);
         replacement
             .borrow()
             .save(&file_path)
             .expect("Node::save overwrite failed");
         let reloaded = Node::load(&file_path).expect("Node::load overwrite failed");
-        assert_eq!(reloaded.borrow().id, [89u8; 16]);
+        assert_eq!(reloaded.borrow().id, "89");
         assert!(reloaded.borrow().self_hash.is_none());
     }
 
     #[test]
     fn test_node_insert_ref_errors_and_replacement() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
-        let parent = Node::new([1u8; 16], ChildrenType::Attributes);
-        let leaf = Node::new([2u8; 16], ChildrenType::None);
+        let root = Node::new("0", ChildrenType::Attributes);
+        let parent = Node::new("1", ChildrenType::Attributes);
+        let leaf = Node::new("2", ChildrenType::None);
 
         Node::insert(&root, ChildType::Ref(Rc::clone(&parent))).unwrap();
         Node::insert(&parent, ChildType::Ref(Rc::clone(&leaf))).unwrap();
-        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, "1");
 
         // Inserting into Children::None must fail without mutating leaf's parent.
-        let other_leaf = Node::new([3u8; 16], ChildrenType::None);
+        let other_leaf = Node::new("3", ChildrenType::None);
         assert!(Node::insert(&other_leaf, ChildType::Ref(Rc::clone(&leaf))).is_err());
-        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, "1");
 
         // Self-insertion and ancestor cycle insertion must fail without panicking.
         assert!(Node::insert(&parent, ChildType::Ref(Rc::clone(&parent))).is_err());
@@ -1478,43 +1495,43 @@ mod tests {
 
         // Re-inserting the same NodeRef keeps its parent intact.
         Node::insert(&parent, ChildType::Ref(Rc::clone(&leaf))).unwrap();
-        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, [1u8; 16]);
+        assert_eq!(leaf.borrow().parent().unwrap().borrow().id, "1");
 
         // Replacing with a new NodeRef of the same ID clears the displaced node's parent.
-        let replacement = Node::new([2u8; 16], ChildrenType::None);
+        let replacement = Node::new("2", ChildrenType::None);
         Node::insert(&parent, ChildType::Ref(Rc::clone(&replacement))).unwrap();
         assert!(leaf.borrow().parent().is_none());
         assert_eq!(
             replacement.borrow().parent().unwrap().borrow().id,
-            [1u8; 16]
+            "1"
         );
     }
 
     #[test]
     fn test_get_or_insert_child() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
-        let child_id = [7u8; 16];
+        let root = Node::new("0", ChildrenType::Attributes);
+        let child_id = "7";
 
         let created = get_or_insert_child(&root, child_id, ChildrenType::Files).unwrap();
         assert!(matches!(created.borrow().children, Children::Files(_)));
-        assert_eq!(created.borrow().parent().unwrap().borrow().id, [0u8; 16]);
+        assert_eq!(created.borrow().parent().unwrap().borrow().id, "0");
         created.borrow_mut().visited = true;
 
         let fetched = get_or_insert_child(&root, child_id, ChildrenType::None).unwrap();
         assert!(Rc::ptr_eq(&created, &fetched));
         assert!(fetched.borrow().visited);
 
-        let leaf = get_or_insert_child(&created, [8u8; 16], ChildrenType::None).unwrap();
-        assert!(get_or_insert_child(&leaf, [9u8; 16], ChildrenType::None).is_err());
+        let leaf = get_or_insert_child(&created, "8", ChildrenType::None).unwrap();
+        assert!(get_or_insert_child(&leaf, "9", ChildrenType::None).is_err());
     }
 
     #[test]
     fn test_invalidate_ancestors_hash() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
-        let task = get_or_insert_child(&root, [1u8; 16], ChildrenType::Attributes).unwrap();
-        let subject = get_or_insert_child(&task, [2u8; 16], ChildrenType::Files).unwrap();
-        let leaf = get_or_insert_child(&subject, [3u8; 16], ChildrenType::None).unwrap();
-        let sibling_task = get_or_insert_child(&root, [4u8; 16], ChildrenType::Files).unwrap();
+        let root = Node::new("0", ChildrenType::Attributes);
+        let task = get_or_insert_child(&root, "1", ChildrenType::Attributes).unwrap();
+        let subject = get_or_insert_child(&task, "2", ChildrenType::Files).unwrap();
+        let leaf = get_or_insert_child(&subject, "3", ChildrenType::None).unwrap();
+        let sibling_task = get_or_insert_child(&root, "4", ChildrenType::Files).unwrap();
 
         for node in [&root, &task, &subject, &leaf, &sibling_task] {
             let mut n = node.borrow_mut();
@@ -1562,9 +1579,9 @@ mod tests {
 
     #[test]
     fn test_meta_btree_roundtrip_and_parent_links() {
-        let root = Node::new([0u8; 16], ChildrenType::Attributes);
-        let readme_id = [1u8; 16];
-        let meta_json_id = [2u8; 16];
+        let root = Node::new("0", ChildrenType::Attributes);
+        let readme_id = "1";
+        let meta_json_id = "2";
 
         let readme = get_or_insert_meta(&root, readme_id);
         let readme_hash = blake3::hash(b"readme");
@@ -1585,27 +1602,27 @@ mod tests {
 
         let root_ref = loaded.root.borrow();
         assert_eq!(root_ref.meta.len(), 2);
-        let loaded_readme = root_ref.meta.get(&readme_id).unwrap();
+        let loaded_readme = root_ref.meta.get(readme_id).unwrap();
         assert_eq!(loaded_readme.borrow().self_hash, Some(readme_hash));
         assert!(loaded_readme.borrow().visited);
         assert_eq!(
             loaded_readme.borrow().parent().unwrap().borrow().id,
-            [0u8; 16]
+            "0"
         );
         assert_eq!(
-            root_ref.meta.get(&meta_json_id).unwrap().borrow().self_hash,
+            root_ref.meta.get(meta_json_id).unwrap().borrow().self_hash,
             Some(meta_hash)
         );
     }
 
     #[test]
     fn test_reset_visited_and_prune_unvisited() {
-        let tree = Tree::new([0u8; 16]);
-        let task = get_or_insert_child(&tree.root, [1u8; 16], ChildrenType::Files).unwrap();
-        let kept_file = get_or_insert_child(&task, [2u8; 16], ChildrenType::None).unwrap();
-        let deleted_file = get_or_insert_child(&task, [3u8; 16], ChildrenType::None).unwrap();
-        let kept_meta = get_or_insert_meta(&tree.root, [4u8; 16]);
-        let deleted_meta = get_or_insert_meta(&task, [5u8; 16]);
+        let tree = Tree::new("0");
+        let task = get_or_insert_child(&tree.root, "1", ChildrenType::Files).unwrap();
+        let kept_file = get_or_insert_child(&task, "2", ChildrenType::None).unwrap();
+        let deleted_file = get_or_insert_child(&task, "3", ChildrenType::None).unwrap();
+        let kept_meta = get_or_insert_meta(&tree.root, "4");
+        let deleted_meta = get_or_insert_meta(&task, "5");
 
         for n in [
             &tree.root,
@@ -1641,8 +1658,8 @@ mod tests {
 
         assert!(tree.prune_unvisited());
 
-        assert!(tree.root.borrow().meta.contains_key(&[4u8; 16]));
-        assert!(!task.borrow().meta.contains_key(&[5u8; 16]));
+        assert!(tree.root.borrow().meta.contains_key("4"));
+        assert!(!task.borrow().meta.contains_key("5"));
         assert!(deleted_meta.borrow().parent().is_none());
         assert!(!task.borrow().valid_self_hash);
         assert!(!task.borrow().valid_child_hash);
@@ -1650,8 +1667,8 @@ mod tests {
 
         match &task.borrow().children {
             Children::Files(map) => {
-                assert!(map.contains_key(&[2u8; 16]));
-                assert!(!map.contains_key(&[3u8; 16]));
+                assert!(map.contains_key("2"));
+                assert!(!map.contains_key("3"));
             }
             _ => panic!("Expected Children::Files"),
         }

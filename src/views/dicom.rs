@@ -1,7 +1,7 @@
 use crate::core::tree::NodeRef;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
-use crate::views::utils::{get_name, string2buf128};
+use crate::views::utils::get_name;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,12 +37,12 @@ impl View for Dicom {
             .map(String::from) // make each slice into a string
             .collect(); // gather them together into a vector
 
-        let source = Some(string2buf128(
-            others.get(0).map(String::as_str).unwrap_or_default(),
-        ));
-        let task = Some(string2buf128(
-            others.get(1).map(String::as_str).unwrap_or_default(),
-        ));
+        let source = Some(
+            others.get(0).map(String::as_str).unwrap_or_default().to_string(),
+        );
+        let task = Some(
+            others.get(1).map(String::as_str).unwrap_or_default().to_string(),
+        );
 
         ViewAttributesIndex {
             subject,
@@ -65,60 +65,60 @@ impl View for Dicom {
         )
     }
 
-    fn index_root(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    fn index_root(&self, _path: &Path, _node: &NodeRef) -> Result<(), ()> {
         Err(())
     }
 
-    fn index_task(&self, path: &Path, node: &NodeRef) -> Result<(), ()> {
+    fn index_task(&self, _path: &Path, _node: &NodeRef) -> Result<(), ()> {
         Err(())
     }
 
-    fn index_source(&self, path: &Path, node: &NodeRef, task_id: &[u8; 16]) -> Result<(), ()> {
+    fn index_source(&self, _path: &Path, _node: &NodeRef, _task_id: &str) -> Result<(), ()> {
         Err(())
     }
 
     fn index_subject(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_study(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_series(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
+        _study_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
 
     fn index_instance(
         &self,
-        path: &Path,
-        node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
-        series_id: &[u8; 16],
+        _path: &Path,
+        _node: &NodeRef,
+        _task_id: &str,
+        _source_id: &str,
+        _subject_id: &str,
+        _study_id: &str,
+        _series_id: &str,
     ) -> Result<(), ()> {
         Err(())
     }
@@ -184,12 +184,12 @@ mod tests {
         let mut dicom = Dicom::default();
         let dicom = dicom.index(&file_path);
 
-        assert_eq!(dicom.subject, Some(string2buf128("subject_001")));
-        assert_eq!(dicom.study, Some(string2buf128("study_001")));
-        assert_eq!(dicom.series, Some(string2buf128("series_001")));
-        assert_eq!(dicom.instance, Some(string2buf128("instance_001.dcm")));
-        assert_eq!(dicom.source, Some(string2buf128("clinic")));
-        assert_eq!(dicom.task, Some(string2buf128("data")));
+        assert_eq!(dicom.subject.as_deref(), Some("subject_001"));
+        assert_eq!(dicom.study.as_deref(), Some("study_001"));
+        assert_eq!(dicom.series.as_deref(), Some("series_001"));
+        assert_eq!(dicom.instance.as_deref(), Some("instance_001.dcm"));
+        assert_eq!(dicom.source.as_deref(), Some("clinic"));
+        assert_eq!(dicom.task.as_deref(), Some("data"));
     }
 
     #[test]

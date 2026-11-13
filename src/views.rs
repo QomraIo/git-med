@@ -92,7 +92,7 @@ pub fn index_source(
     view: &str,
     path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
+    task_id: &str,
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
     index_source_in(v.as_ref(), Path::new("."), path, node, task_id)
@@ -103,7 +103,7 @@ pub fn index_source_in(
     repo_root: &Path,
     rel_path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
+    task_id: &str,
 ) -> Result<(), ()> {
     index_if_needed(repo_root, rel_path, node, || {
         view.index_source(rel_path, node, task_id)
@@ -114,8 +114,8 @@ pub fn index_subject(
     view: &str,
     path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
     index_subject_in(v.as_ref(), Path::new("."), path, node, task_id, source_id)
@@ -126,8 +126,8 @@ pub fn index_subject_in(
     repo_root: &Path,
     rel_path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
 ) -> Result<(), ()> {
     index_if_needed(repo_root, rel_path, node, || {
         view.index_subject(rel_path, node, task_id, source_id)
@@ -138,9 +138,9 @@ pub fn index_study(
     view: &str,
     path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
     index_study_in(
@@ -159,9 +159,9 @@ pub fn index_study_in(
     repo_root: &Path,
     rel_path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
 ) -> Result<(), ()> {
     index_if_needed(repo_root, rel_path, node, || {
         view.index_study(rel_path, node, task_id, source_id, subject_id)
@@ -172,10 +172,10 @@ pub fn index_series(
     view: &str,
     path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
-    study_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
+    study_id: &str,
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
     index_series_in(
@@ -195,10 +195,10 @@ pub fn index_series_in(
     repo_root: &Path,
     rel_path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
-    study_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
+    study_id: &str,
 ) -> Result<(), ()> {
     index_if_needed(repo_root, rel_path, node, || {
         view.index_series(rel_path, node, task_id, source_id, subject_id, study_id)
@@ -209,11 +209,11 @@ pub fn index_instance(
     view: &str,
     path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
-    study_id: &[u8; 16],
-    series_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
+    study_id: &str,
+    series_id: &str,
 ) -> Result<(), ()> {
     let v = get_view(view).ok_or(())?;
     index_instance_in(
@@ -234,11 +234,11 @@ pub fn index_instance_in(
     repo_root: &Path,
     rel_path: &Path,
     node: &NodeRef,
-    task_id: &[u8; 16],
-    source_id: &[u8; 16],
-    subject_id: &[u8; 16],
-    study_id: &[u8; 16],
-    series_id: &[u8; 16],
+    task_id: &str,
+    source_id: &str,
+    subject_id: &str,
+    study_id: &str,
+    series_id: &str,
 ) -> Result<(), ()> {
     index_if_needed(repo_root, rel_path, node, || {
         view.index_instance(
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_should_hash_detects_missing_hash_and_metadata_changes() {
-        let node = Node::new([1u8; 16], ChildrenType::None);
+        let node = Node::new("1", ChildrenType::None);
         let t1 = UNIX_EPOCH + Duration::new(1_700_000_000, 0);
         let t2 = UNIX_EPOCH + Duration::new(1_700_000_001, 0);
         let meta = FileMetadata {
@@ -307,7 +307,7 @@ mod tests {
         std::fs::write(&file_path, b"hello").unwrap();
 
         let meta = get_file_metadata(&file_path);
-        let node = Node::new([2u8; 16], ChildrenType::None);
+        let node = Node::new("2", ChildrenType::None);
         {
             let mut n = node.borrow_mut();
             n.self_hash = Some(blake3::hash(b"hello"));
