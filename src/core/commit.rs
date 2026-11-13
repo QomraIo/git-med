@@ -157,21 +157,68 @@ pub fn update_branch_head_in(repo_root: &Path, commit_hash: &Hash) -> Result<(),
     Ok(())
 }
 
-pub fn commit() -> Result<Hash, String> {
+pub fn parse_commit_message(args: &[String]) -> Result<String, String> {
+    let mut messages: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "-m" {
+            if i + 1 < args.len() {
+                messages.push(args[i + 1].clone());
+                i += 2;
+            } else {
+                return Err("-m requires a commit message".to_string());
+            }
+        } else if !args[i].starts_with('-') && messages.is_empty() {
+            messages.push(args[i].clone());
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if messages.is_empty() {
+        Ok("Commit".to_string())
+    } else {
+        Ok(messages.join("\n\n"))
+    }
+}
+
+pub fn commit(args: &Vec<String>) {
+    let message = match parse_commit_message(args) {
+        Ok(msg) => msg,
+        Err(err) => {
+            eprintln!("git-med commit failed: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = commit_with_message_in(Path::new("."), &message) {
+        eprintln!("git-med commit failed: {}", err);
+        std::process::exit(1);
+    }
+}
+
+pub fn commit_head() -> Result<Hash, String> {
     commit_in(Path::new("."))
 }
 
 pub fn commit_in(repo_root: &Path) -> Result<Hash, String> {
+    commit_with_message_in(repo_root, "Commit")
+}
+
+pub fn commit_with_message_in(repo_root: &Path, message: &str) -> Result<Hash, String> {
     let head_hash = load_head_hash_in(repo_root)?;
     let tree_index = repo_root.join(".git-med/index");
     let tree = load_or_fail_tree(&tree_index)
         .map_err(|e| format!("failed to load index: {}", e))?;
-    let tree_hash = tree.hash();
+    let tree_hash = tree.hash_in(repo_root)?;
+
+    let _ = tree.save(&tree_index);
 
     let commit = Commit {
         tree: tree_hash,
         parent: head_hash,
-        message: "Commit".to_string(),
+        message: message.to_string(),
     };
     commit.write_in(repo_root)
 }
@@ -306,5 +353,101 @@ mod tests {
         // HEAD should be updated directly
         let head_content = fs::read_to_string(repo.path.join(".git-med/HEAD")).unwrap();
         assert_eq!(head_content, format!("{}\n", commit_hash.to_hex()));
+    }
+
+    #[test]
+    fn test_parse_commit_message_variants() {
+        let empty_args: Vec<String> = vec!["git-med".to_string(), "commit".to_string()];
+        assert_eq!(parse_commit_message(&empty_args).unwrap(), "Commit");
+
+        let m_flag_args: Vec<String> = vec![
+            "git-med".to_string(),
+            "commit".to_string(),
+            "-m".to_string(),
+            "custom message".to_string(),
+        ];
+        assert_eq!(parse_commit_message(&m_flag_args).unwrap(), "custom message");
+
+        let positional_args: Vec<String> = vec![
+            "git-med".to_string(),
+            "commit".to_string(),
+            "positional message".to_string(),
+        ];
+        assert_eq!(parse_commit_message(&positional_args).unwrap(), "positional message");
+
+        let multiple_m_args: Vec<String> = vec![
+            "git-med".to_string(),
+            "commit".to_string(),
+            "-m".to_string(),
+            "title".to_string(),
+            "-m".to_string(),
+            "body".to_string(),
+        ];
+        assert_eq!(parse_commit_message(&multiple_m_args).unwrap(), "title\n\nbody");
+
+        let missing_m_val: Vec<String> = vec![
+            "git-med".to_string(),
+            "commit".to_string(),
+            "-m".to_string(),
+        ];
+        assert!(parse_commit_message(&missing_m_val).is_err());
+    }
+
+    #[test]
+    fn test_commit_in_empty_index_fails() {
+        let repo = TempRepo::new("empty_index");
+        let err = commit_in(&repo.path).expect_err("commit should fail on empty index");
+        assert!(err.contains("No tree found") || err.contains("failed to load index"));
+    }
+
+    #[test]
+    fn test_commit_in_end_to_end_with_add() {
+        use crate::core::add::add_in;
+
+        let repo = TempRepo::new("commit_e2e");
+        let series_dir = repo.path.join("data/clinic/subject_001/study_001/series_001");
+        fs::create_dir_all(&series_dir).unwrap();
+        fs::write(repo.path.join("README.md"), "# Test Dataset\n").unwrap();
+        fs::write(series_dir.join("instance_001.dcm"), "DICOM DATA 1").unwrap();
+
+        add_in(&repo.path).expect("add_in should succeed");
+
+        let commit_1_hash = commit_with_message_in(&repo.path, "Initial commit")
+            .expect("first commit should succeed");
+
+        let hex_1 = commit_1_hash.to_hex();
+        let head_1 = load_head_hash_in(&repo.path).unwrap();
+        assert_eq!(head_1, Some(hex_1.to_string()));
+
+        // Commit object should exist on disk
+        let obj_1_path = repo
+            .path
+            .join(".git-med/objects")
+            .join(&hex_1[..2])
+            .join(&hex_1[2..]);
+        assert!(obj_1_path.is_file());
+
+        // Second commit
+        fs::write(series_dir.join("instance_002.dcm"), "DICOM DATA 2").unwrap();
+        add_in(&repo.path).expect("second add_in should succeed");
+
+        let commit_2_hash = commit_with_message_in(&repo.path, "Second commit")
+            .expect("second commit should succeed");
+
+        let hex_2 = commit_2_hash.to_hex();
+        let head_2 = load_head_hash_in(&repo.path).unwrap();
+        assert_eq!(head_2, Some(hex_2.to_string()));
+
+        let obj_2_path = repo
+            .path
+            .join(".git-med/objects")
+            .join(&hex_2[..2])
+            .join(&hex_2[2..]);
+        assert!(obj_2_path.is_file());
+
+        let commit_2_bytes = fs::read(&obj_2_path).unwrap();
+        let commit_2_str = String::from_utf8_lossy(&commit_2_bytes);
+        assert!(commit_2_str.contains(hex_1.as_str()), "commit 2 must reference commit 1 as parent");
+        assert!(commit_2_str.contains("Second commit"), "commit 2 must contain its message");
     }
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use blake3::Hash;
 
-use crate::files::commit::save_tree;
+use crate::files::commit::{save_tree, save_tree_in};
 use crate::files::types::FileMetadata;
 
 // Type aliases make the signatures much cleaner and easier to read
@@ -391,6 +391,10 @@ impl Tree {
 
     pub fn hash(&self) -> blake3::Hash {
         save_tree(self.root.clone()).unwrap()
+    }
+
+    pub fn hash_in(&self, repo_root: &Path) -> Result<blake3::Hash, String> {
+        save_tree_in(self.root.clone(), repo_root)
     }
 }
 

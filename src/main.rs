@@ -4,6 +4,7 @@ mod tester;
 mod views;
 
 use core::add::add;
+use core::commit::commit;
 use core::init::init;
 use std::env;
 use tester::generate::generate;
@@ -21,6 +22,7 @@ fn main() {
     match command.as_str() {
         "init" => init(&args),
         "add" => add(&args),
+        "commit" => commit(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }
