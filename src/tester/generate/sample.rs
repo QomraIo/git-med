@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const BRATS_SAMPLE: &[u8] = include_bytes!("data/BraTS.nii.gz");
-const DICOM_SAMPLE: &[u8] =
+pub const BRATS_SAMPLE: &[u8] = include_bytes!("data/BraTS.nii.gz");
+pub const DICOM_SAMPLE: &[u8] =
     include_bytes!("data/1.3.12.2.1107.5.2.19.45594.2018071915225876779003334.dcm");
 
 pub fn brats(root: &Path, n_subjects: usize, study_per_subjects: usize, file_per_study: usize) {

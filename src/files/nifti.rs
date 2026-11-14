@@ -1,9 +1,12 @@
+use std::io::Read;
 use std::path::Path;
+use flate2::read::GzDecoder;
 
 use crate::files::dicom::extract_dicom_pixel_data;
 
 pub const NIFTI2_HEADER_SIZE: usize = 540;
 pub const NIFTI2_VOX_OFFSET: i64 = 544; // 540 header + 4 extension bytes
+pub const NIFTI1_HEADER_SIZE: usize = 348;
 
 /// Construct a standard compliant NIfTI-2 binary image from 2D pixel data.
 pub fn create_nifti2_from_pixel_data(
@@ -111,11 +114,132 @@ pub fn dicom_to_nifti2(dcm_path: &Path) -> Result<Vec<u8>, String> {
 }
 
 #[derive(Debug, Clone)]
+pub struct NiftiPixelData {
+    pub rows: u16,
+    pub cols: u16,
+    pub bits_allocated: u16,
+    pub pixel_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Nifti2PixelData<'a> {
     pub rows: u16,
     pub cols: u16,
     pub bits_allocated: u16,
     pub pixel_data: &'a [u8],
+}
+
+/// Extract image dimensions and pixel data from a NIfTI payload (supporting NIfTI-2, NIfTI-1, and gzipped NIfTI).
+pub fn extract_nifti_pixel_data(raw_bytes: &[u8]) -> Result<NiftiPixelData, String> {
+    let decompressed = if raw_bytes.len() >= 2 && raw_bytes[0..2] == [0x1F, 0x8B] {
+        let mut decoder = GzDecoder::new(raw_bytes);
+        let mut buf = Vec::new();
+        decoder
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("failed to decompress gzipped NIfTI: {}", e))?;
+        buf
+    } else {
+        raw_bytes.to_vec()
+    };
+
+    if decompressed.len() < 348 {
+        return Err(format!(
+            "NIfTI payload too short ({} bytes, expected at least 348)",
+            decompressed.len()
+        ));
+    }
+
+    let sizeof_hdr = i32::from_le_bytes(
+        decompressed[0..4]
+            .try_into()
+            .map_err(|e| format!("failed to read sizeof_hdr: {}", e))?,
+    );
+
+    match sizeof_hdr {
+        540 => {
+            // NIfTI-2
+            let bitpix = i16::from_le_bytes(
+                decompressed[14..16]
+                    .try_into()
+                    .map_err(|e| format!("failed to read bitpix: {}", e))?,
+            ) as u16;
+
+            let cols = i64::from_le_bytes(
+                decompressed[24..32]
+                    .try_into()
+                    .map_err(|e| format!("failed to read dim1 (cols): {}", e))?,
+            ) as u16;
+
+            let rows = i64::from_le_bytes(
+                decompressed[32..40]
+                    .try_into()
+                    .map_err(|e| format!("failed to read dim2 (rows): {}", e))?,
+            ) as u16;
+
+            let vox_offset = i64::from_le_bytes(
+                decompressed[168..176]
+                    .try_into()
+                    .map_err(|e| format!("failed to read vox_offset: {}", e))?,
+            ) as usize;
+
+            let pixel_data = if decompressed.len() > vox_offset {
+                decompressed[vox_offset..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            Ok(NiftiPixelData {
+                rows,
+                cols,
+                bits_allocated: bitpix,
+                pixel_data,
+            })
+        }
+        348 => {
+            // NIfTI-1
+            let cols = i16::from_le_bytes(
+                decompressed[42..44]
+                    .try_into()
+                    .map_err(|e| format!("failed to read dim1 (cols): {}", e))?,
+            ) as u16;
+
+            let rows = i16::from_le_bytes(
+                decompressed[44..46]
+                    .try_into()
+                    .map_err(|e| format!("failed to read dim2 (rows): {}", e))?,
+            ) as u16;
+
+            let bitpix = i16::from_le_bytes(
+                decompressed[72..74]
+                    .try_into()
+                    .map_err(|e| format!("failed to read bitpix: {}", e))?,
+            ) as u16;
+
+            let vox_offset_f = f32::from_le_bytes(
+                decompressed[108..112]
+                    .try_into()
+                    .map_err(|e| format!("failed to read vox_offset: {}", e))?,
+            );
+            let vox_offset = (vox_offset_f as usize).max(352);
+
+            let pixel_data = if decompressed.len() > vox_offset {
+                decompressed[vox_offset..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            Ok(NiftiPixelData {
+                rows: if rows > 0 { rows } else { 256 },
+                cols: if cols > 0 { cols } else { 256 },
+                bits_allocated: if bitpix > 0 { bitpix } else { 16 },
+                pixel_data,
+            })
+        }
+        other => Err(format!(
+            "unsupported NIfTI sizeof_hdr {} (expected 348 for NIfTI-1 or 540 for NIfTI-2)",
+            other
+        )),
+    }
 }
 
 /// Extract image dimensions and pixel data slice from a NIfTI-2 binary payload.

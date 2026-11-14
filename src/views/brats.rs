@@ -190,11 +190,19 @@ impl View for Brats {
         collect_instances(root, 0, "", "", "", "", "", &mut instances)?;
 
         for entry in instances {
+            let nifti_instance = if entry.instance.ends_with(".nii.gz") || entry.instance.ends_with(".nii") {
+                entry.instance.clone()
+            } else if let Some(stripped) = entry.instance.strip_suffix(".dcm") {
+                format!("{}.nii.gz", stripped)
+            } else {
+                format!("{}.nii.gz", entry.instance)
+            };
+
             let view_attrs = ViewAttributes {
                 subject: &entry.subject,
                 study: &entry.study,
                 series: &entry.series,
-                instance: &entry.instance,
+                instance: &nifti_instance,
                 source: &entry.source,
                 task: &entry.task,
             };

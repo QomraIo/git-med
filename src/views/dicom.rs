@@ -1,6 +1,6 @@
 use crate::core::tree::{Children, ChildrenType, Node, NodeMetadata, NodeRef};
 use crate::files::dicom::{parse_dicom_header, reconstruct_dicom_bytes, save_or_merge_draft};
-use crate::files::nifti::{dicom_to_nifti2, extract_nifti2_pixel_data};
+use crate::files::nifti::{dicom_to_nifti2, extract_nifti_pixel_data};
 use crate::files::types::ObjectType;
 use crate::files::utils::{
     get_file_metadata, hash_bytes, make_object_from_bytes_in, read_object_bytes_in,
@@ -295,24 +295,47 @@ impl View for Dicom {
 
                                 let (_, nifti_bytes) =
                                     read_object_bytes_in(&self.repo_root, &blob_hash)?;
-                                let px = extract_nifti2_pixel_data(&nifti_bytes)?;
 
-                                let dcm_bytes = reconstruct_dicom_bytes(
-                                    &patient_tags,
-                                    &study_tags,
-                                    &series_tags,
-                                    px.rows,
-                                    px.cols,
-                                    px.bits_allocated,
-                                    px.pixel_data,
-                                    &instance_id,
-                                )?;
+                                let dcm_bytes = if (nifti_bytes.len() >= 132
+                                    && &nifti_bytes[128..132] == b"DICM")
+                                    || (nifti_bytes.len() >= 4
+                                        && &nifti_bytes[0..2] == &[0x02, 0x00])
+                                {
+                                    nifti_bytes
+                                } else {
+                                    match extract_nifti_pixel_data(&nifti_bytes) {
+                                        Ok(px) => reconstruct_dicom_bytes(
+                                            &patient_tags,
+                                            &study_tags,
+                                            &series_tags,
+                                            px.rows,
+                                            px.cols,
+                                            px.bits_allocated,
+                                            &px.pixel_data,
+                                            &instance_id,
+                                        )?,
+                                        Err(_) => {
+                                            // Non-NIfTI / non-DICOM payload: preserve blob as-is
+                                            nifti_bytes
+                                        }
+                                    }
+                                };
+
+                                let dcm_filename = if instance_id.ends_with(".dcm") {
+                                    instance_id.clone()
+                                } else if let Some(stripped) = instance_id.strip_suffix(".nii.gz") {
+                                    format!("{}.dcm", stripped)
+                                } else if let Some(stripped) = instance_id.strip_suffix(".nii") {
+                                    format!("{}.dcm", stripped)
+                                } else {
+                                    format!("{}.dcm", instance_id)
+                                };
 
                                 let view_attrs = ViewAttributes {
                                     subject: &subject_id,
                                     study: &study_id,
                                     series: &series_id,
-                                    instance: &instance_id,
+                                    instance: &dcm_filename,
                                     source: &source_id,
                                     task: &task_id,
                                 };
@@ -331,7 +354,7 @@ impl View for Dicom {
 
                                 // Write .view.<instance_id> sidecar file
                                 if let Some(parent) = target_file.parent() {
-                                    let sidecar_file = parent.join(format!(".view.{}", instance_id));
+                                    let sidecar_file = parent.join(format!(".view.{}", dcm_filename));
                                     fs::write(&sidecar_file, format!("{}\n", sidecar_content.trim_end())).map_err(|e| {
                                         format!("failed to write sidecar {}: {}", sidecar_file.display(), e)
                                     })?;
