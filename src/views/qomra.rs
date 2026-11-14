@@ -1,7 +1,6 @@
 use crate::core::tree::{Children, NodeRef};
 use crate::files::types::ObjectType;
-use crate::files::utils::{hash, make_object_in, read_object_bytes_in};
-use crate::views::get_file_metadata;
+use crate::files::utils::read_object_bytes_in;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
 use std::fs;
@@ -137,49 +136,9 @@ fn normalized_depth(path: &Path) -> usize {
         .count()
 }
 
-fn add_node_object_in(
-    repo_root: &Path,
-    rel_path: &Path,
-    node: &NodeRef,
-    obj_type: ObjectType,
-) -> Result<(), ()> {
-    let disk_path = repo_root.join(rel_path);
-    let digest = hash(&disk_path, None, obj_type);
-    let mut node_mut = node.borrow_mut();
-
-    if node_mut.self_hash != Some(digest) {
-        make_object_in(&disk_path, digest, obj_type, repo_root).map_err(|_| ())?;
-        node_mut.self_hash = Some(digest);
-        if obj_type == ObjectType::Meta {
-            if let Some(parent_ref) = node_mut.parent() {
-                parent_ref.borrow_mut().valid_self_hash = false;
-                parent_ref.borrow().invalidate_ancestors_hash();
-            }
-        } else {
-            node_mut.invalidate_ancestors_hash();
-        }
-    }
-
-    node_mut.node_metadata = get_file_metadata(&disk_path);
-    node_mut.visited = true;
-    Ok(())
-}
-
-pub fn git_add_file(path: &Path, node: &NodeRef) -> Result<(), ()> {
-    git_add_file_in(Path::new("."), path, node)
-}
-
-pub fn git_add_metafile(path: &Path, node: &NodeRef) -> Result<(), ()> {
-    git_add_metafile_in(Path::new("."), path, node)
-}
-
-pub fn git_add_file_in(repo_root: &Path, rel_path: &Path, node: &NodeRef) -> Result<(), ()> {
-    add_node_object_in(repo_root, rel_path, node, ObjectType::Blob)
-}
-
-pub fn git_add_metafile_in(repo_root: &Path, rel_path: &Path, node: &NodeRef) -> Result<(), ()> {
-    add_node_object_in(repo_root, rel_path, node, ObjectType::Meta)
-}
+pub use crate::views::utils::{
+    add_node_object_in, git_add_file, git_add_file_in, git_add_metafile, git_add_metafile_in,
+};
 
 impl View for Qomra {
     fn index(&mut self, path: &Path) -> ViewAttributesIndex {

@@ -21,7 +21,7 @@ pub fn get_view(view: &str) -> Option<Box<dyn View>> {
 /// Resolve a [`View`] implementation configured to operate under `repo_root`.
 pub fn get_view_in(view: &str, repo_root: &Path) -> Option<Box<dyn View>> {
     match view {
-        "brats" => Some(Box::new(Brats::default())),
+        "brats" => Some(Box::new(Brats::new(repo_root))),
         "dicom" => Some(Box::new(Dicom::default())),
         "qomra" => Some(Box::new(Qomra::new(repo_root))),
         _ => None,

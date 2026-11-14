@@ -5,6 +5,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub trait View {
+    fn is_trackable(&self, _path: &Path) -> bool {
+        true
+    }
+
     fn index(&mut self, path: &Path) -> ViewAttributesIndex;
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String);
 

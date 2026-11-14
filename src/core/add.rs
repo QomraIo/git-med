@@ -125,6 +125,10 @@ fn index_file_with_view(
     root: &NodeRef,
     view: &mut dyn View,
 ) -> Result<(), String> {
+    if !view.is_trackable(rel_path) {
+        return Ok(());
+    }
+
     let attrs = view.index(rel_path);
     let file_id = rel_path
         .file_name()
