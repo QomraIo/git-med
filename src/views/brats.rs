@@ -1,8 +1,9 @@
-use crate::core::tree::NodeRef;
+use crate::core::tree::{Children, NodeRef};
+use crate::files::utils::read_object_bytes_in;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
 use crate::views::utils::{get_name, git_add_file_in};
-use std::fs::read_to_string;
+use std::fs::{self, read_to_string};
 use std::path::{Path, PathBuf};
 
 /// Check whether `path` represents a NIfTI file based on extension.
@@ -105,7 +106,8 @@ impl View for Brats {
 
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String) {
         let mut path = PathBuf::new().join(view_attributes.subject);
-        if !view_attributes.study.is_empty() {
+        let synthetic_study = format!("study_{}", view_attributes.subject);
+        if !view_attributes.study.is_empty() && view_attributes.study != synthetic_study {
             path = path.join(view_attributes.study);
         }
         path = path.join(view_attributes.instance);
@@ -183,9 +185,132 @@ impl View for Brats {
         git_add_file_in(&self.repo_root, path, node)
     }
 
-    fn write(&self, _root: &NodeRef) -> Result<(), String> {
+    fn write(&self, root: &NodeRef) -> Result<(), String> {
+        let mut instances = Vec::new();
+        collect_instances(root, 0, "", "", "", "", "", &mut instances)?;
+
+        for entry in instances {
+            let view_attrs = ViewAttributes {
+                subject: &entry.subject,
+                study: &entry.study,
+                series: &entry.series,
+                instance: &entry.instance,
+                source: &entry.source,
+                task: &entry.task,
+            };
+
+            let (rel_instance_path, sidecar_content) = self.view(&view_attrs);
+            let full_instance_path = self.repo_root.join(&rel_instance_path);
+
+            if let Some(parent) = full_instance_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir {}: {}", parent.display(), e))?;
+            }
+
+            // 1. Write the instance file from blob
+            let (_, blob_bytes) = read_object_bytes_in(&self.repo_root, &entry.blob_hash)?;
+            fs::write(&full_instance_path, blob_bytes).map_err(|e| {
+                format!(
+                    "failed to write instance file {}: {}",
+                    full_instance_path.display(),
+                    e
+                )
+            })?;
+
+            // 2. Write the .view.<filename> sidecar with format <source>\n<task>\n
+            let instance_filename = full_instance_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("invalid filename for {}", full_instance_path.display()))?;
+            let sidecar_filename = format!(".view.{}", instance_filename);
+            let sidecar_path = full_instance_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(sidecar_filename);
+            let sidecar_bytes = format!("{}\n", sidecar_content.trim());
+            fs::write(&sidecar_path, sidecar_bytes).map_err(|e| {
+                format!(
+                    "failed to write sidecar file {}: {}",
+                    sidecar_path.display(),
+                    e
+                )
+            })?;
+        }
+
         Ok(())
     }
+}
+
+struct InstanceEntry {
+    task: String,
+    source: String,
+    subject: String,
+    study: String,
+    series: String,
+    instance: String,
+    blob_hash: blake3::Hash,
+}
+
+fn collect_instances(
+    node_ref: &NodeRef,
+    depth: usize,
+    task: &str,
+    source: &str,
+    subject: &str,
+    study: &str,
+    series: &str,
+    out: &mut Vec<InstanceEntry>,
+) -> Result<(), String> {
+    let node = node_ref.borrow();
+    match &node.children {
+        Children::Attributes(map) | Children::Files(map) => {
+            for (child_id, child_node) in map {
+                match depth {
+                    0 => collect_instances(child_node, 1, child_id, source, subject, study, series, out)?,
+                    1 => collect_instances(child_node, 2, task, child_id, subject, study, series, out)?,
+                    2 => collect_instances(child_node, 3, task, source, child_id, study, series, out)?,
+                    3 => collect_instances(child_node, 4, task, source, subject, child_id, series, out)?,
+                    4 => collect_instances(child_node, 5, task, source, subject, study, child_id, out)?,
+                    _ => {
+                        let is_leaf = matches!(child_node.borrow().children, Children::None);
+                        if is_leaf {
+                            let blob_hash = child_node.borrow().self_hash.ok_or_else(|| {
+                                format!("leaf node {} missing self_hash", child_id)
+                            })?;
+                            out.push(InstanceEntry {
+                                task: task.to_string(),
+                                source: source.to_string(),
+                                subject: subject.to_string(),
+                                study: study.to_string(),
+                                series: series.to_string(),
+                                instance: child_id.clone(),
+                                blob_hash,
+                            });
+                        } else {
+                            collect_instances(child_node, depth + 1, task, source, subject, study, child_id, out)?;
+                        }
+                    }
+                }
+            }
+        }
+        Children::None => {
+            if depth > 0 {
+                let blob_hash = node.self_hash.ok_or_else(|| {
+                    format!("leaf node {} missing self_hash", node.id)
+                })?;
+                out.push(InstanceEntry {
+                    task: task.to_string(),
+                    source: source.to_string(),
+                    subject: subject.to_string(),
+                    study: study.to_string(),
+                    series: series.to_string(),
+                    instance: node.id.clone(),
+                    blob_hash,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -227,6 +352,13 @@ mod tests {
         fn drop(&mut self) {
             println!("Tearing down: deleting {0}", self.output_dir);
             let _ = remove_dir_all(&self.output_dir);
+        }
+    }
+
+    struct TempDirGuard(PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = remove_dir_all(&self.0);
         }
     }
 
@@ -417,6 +549,7 @@ mod tests {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let repo_dir = PathBuf::from(format!("_tmp_brats_add_e2e_{}_{}", std::process::id(), id));
+        let _guard = TempDirGuard(repo_dir.clone());
 
         // Create sample dataset
         brats(&repo_dir, 1, 1, 2);
@@ -424,7 +557,7 @@ mod tests {
         // Initialize .git-med structure
         let git_med_dir = repo_dir.join(".git-med");
         create_dir_all(&git_med_dir).unwrap();
-        write(git_med_dir.join("config"), "brats").unwrap();
+        write(git_med_dir.join("VIEW"), "brats").unwrap();
 
         // Also add an untracked non-NIfTI file to verify it's skipped cleanly
         write(repo_dir.join("README.txt"), "This should be ignored").unwrap();
@@ -439,6 +572,120 @@ mod tests {
 
         let commit_hash = save_tree_in(tree.root, &repo_dir);
         assert!(commit_hash.is_ok(), "save_tree_in failed: {:?}", commit_hash.err());
+
+        let _ = remove_dir_all(&repo_dir);
+    }
+
+    #[test]
+    fn test_write_nested_with_sidecars() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let repo_dir = PathBuf::from(format!("_tmp_brats_write_nested_{}_{}", std::process::id(), id));
+        let _guard = TempDirGuard(repo_dir.clone());
+
+        // Create sample dataset: 1 subject, 1 study, 2 files
+        brats(&repo_dir, 1, 1, 2);
+
+        // Initialize .git-med
+        let git_med_dir = repo_dir.join(".git-med");
+        create_dir_all(&git_med_dir).unwrap();
+        write(git_med_dir.join("VIEW"), "brats").unwrap();
+
+        // Index and commit
+        add_in(&repo_dir).expect("initial add");
+        let index_path = git_med_dir.join("index");
+        let tree = crate::core::tree::load_or_init_tree(&index_path).expect("load tree");
+        let orig_hash = save_tree_in(tree.root.clone(), &repo_dir).expect("save tree");
+
+        // Delete working copy files
+        let subject_dir = repo_dir.join("subject_001");
+        remove_dir_all(&subject_dir).expect("delete working directory");
+        assert!(!subject_dir.exists());
+
+        // Call write to reconstruct
+        let brats_view = Brats::new(&repo_dir);
+        let write_res = brats_view.write(&tree.root);
+        assert!(write_res.is_ok(), "write failed: {:?}", write_res.err());
+
+        // Verify files and sidecars exist with exact content
+        let file1 = subject_dir.join("study_001").join("subject_001_study_001_t1.nii.gz");
+        let sidecar1 = subject_dir.join("study_001").join(".view.subject_001_study_001_t1.nii.gz");
+        assert!(file1.exists(), "file1 should exist");
+        assert!(sidecar1.exists(), "sidecar1 should exist");
+        let content1 = fs::read_to_string(&sidecar1).unwrap();
+        assert_eq!(content1, "clinic\ndata\n");
+
+        let file2 = subject_dir.join("study_001").join("subject_001_study_001_t1ce.nii.gz");
+        let sidecar2 = subject_dir.join("study_001").join(".view.subject_001_study_001_t1ce.nii.gz");
+        assert!(file2.exists(), "file2 should exist");
+        assert!(sidecar2.exists(), "sidecar2 should exist");
+        let content2 = fs::read_to_string(&sidecar2).unwrap();
+        assert_eq!(content2, "clinic\ndata\n");
+
+        // Round-trip re-index matches original tree hash
+        add_in(&repo_dir).expect("re-add");
+        let tree2 = crate::core::tree::load_or_init_tree(&index_path).expect("load tree2");
+        let re_hash = save_tree_in(tree2.root, &repo_dir).expect("save tree2");
+        assert_eq!(orig_hash, re_hash);
+
+        let _ = remove_dir_all(&repo_dir);
+    }
+
+    #[test]
+    fn test_write_flat_with_sidecars() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let repo_dir = PathBuf::from(format!("_tmp_brats_write_flat_{}_{}", std::process::id(), id));
+        let _guard = TempDirGuard(repo_dir.clone());
+
+        // Create sample dataset: 1 subject, 0 study (flat), 2 files
+        brats(&repo_dir, 1, 0, 2);
+
+        // Initialize .git-med
+        let git_med_dir = repo_dir.join(".git-med");
+        create_dir_all(&git_med_dir).unwrap();
+        write(git_med_dir.join("VIEW"), "brats").unwrap();
+
+        // Index and commit
+        add_in(&repo_dir).expect("initial add");
+        let index_path = git_med_dir.join("index");
+        let tree = crate::core::tree::load_or_init_tree(&index_path).expect("load tree");
+        let orig_hash = save_tree_in(tree.root.clone(), &repo_dir).expect("save tree");
+
+        // Delete working copy files
+        let subject_dir = repo_dir.join("subject_001");
+        remove_dir_all(&subject_dir).expect("delete working directory");
+        assert!(!subject_dir.exists());
+
+        // Call write to reconstruct
+        let brats_view = Brats::new(&repo_dir);
+        let write_res = brats_view.write(&tree.root);
+        assert!(write_res.is_ok(), "write failed: {:?}", write_res.err());
+
+        // Verify flat layout: files are directly under subject_001, NO study_subject_001 subdirectory!
+        assert!(!subject_dir.join("study_subject_001").exists());
+
+        let file1 = subject_dir.join("subject_001_t1.nii.gz");
+        let sidecar1 = subject_dir.join(".view.subject_001_t1.nii.gz");
+        assert!(file1.exists(), "flat file1 should exist");
+        assert!(sidecar1.exists(), "flat sidecar1 should exist");
+        let content1 = fs::read_to_string(&sidecar1).unwrap();
+        assert_eq!(content1, "clinic\ndata\n");
+
+        let file2 = subject_dir.join("subject_001_t1ce.nii.gz");
+        let sidecar2 = subject_dir.join(".view.subject_001_t1ce.nii.gz");
+        assert!(file2.exists(), "flat file2 should exist");
+        assert!(sidecar2.exists(), "flat sidecar2 should exist");
+        let content2 = fs::read_to_string(&sidecar2).unwrap();
+        assert_eq!(content2, "clinic\ndata\n");
+
+        // Round-trip re-index matches original tree hash
+        add_in(&repo_dir).expect("re-add");
+        let tree2 = crate::core::tree::load_or_init_tree(&index_path).expect("load tree2");
+        let re_hash = save_tree_in(tree2.root, &repo_dir).expect("save tree2");
+        assert_eq!(orig_hash, re_hash);
 
         let _ = remove_dir_all(&repo_dir);
     }
