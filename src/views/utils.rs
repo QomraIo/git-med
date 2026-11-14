@@ -75,3 +75,29 @@ pub fn buf128_to_string(buf: &[u8; 16]) -> String {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(16);
     String::from_utf8_lossy(&buf[..len]).to_string()
 }
+
+/// Remove all workspace files and directories except `.git`, `.git-med`, and `.gitignore`.
+pub fn clean_workspace(repo_root: &Path) -> Result<(), String> {
+    if !repo_root.exists() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(repo_root)
+        .map_err(|e| format!("failed to read directory {}: {}", repo_root.display(), e))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".git" || name_str == ".git-med" || name_str == ".gitignore" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| format!("failed to remove directory {}: {}", path.display(), e))?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("failed to remove file {}: {}", path.display(), e))?;
+        }
+    }
+    Ok(())
+}

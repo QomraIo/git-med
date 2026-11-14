@@ -238,6 +238,7 @@ impl View for Dicom {
     }
 
     fn write(&self, root: &NodeRef) -> Result<(), String> {
+        crate::views::utils::clean_workspace(&self.repo_root)?;
         let get_children_map = |node: &NodeRef| -> Vec<(String, NodeRef)> {
             match &node.borrow().children {
                 Children::Attributes(map) | Children::Files(map) => {

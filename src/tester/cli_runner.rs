@@ -116,6 +116,7 @@ impl GitMedCli {
                 &study_per_subjects.to_string(),
                 &series_per_study.to_string(),
                 &file_per_series.to_string(),
+                "clinic",
             ]),
             _ => Err(format!("unknown view for generate: {}", view)),
         }
@@ -190,6 +191,61 @@ impl GitMedCli {
             .join(dir)
             .join(file)
             .is_file()
+    }
+
+    pub fn index_file_exists(&self) -> bool {
+        self.git_med_dir().join("index").is_file()
+    }
+
+    pub fn index_file_size(&self) -> u64 {
+        fs::metadata(self.git_med_dir().join("index"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    pub fn load_commit_tree(&self, commit_hash_hex: &str) -> Result<Tree, String> {
+        let hash = blake3::Hash::from_hex(commit_hash_hex)
+            .map_err(|e| format!("invalid commit hash {}: {}", commit_hash_hex, e))?;
+        crate::files::commit::load_tree_from_commit_in(&self.repo_root, &hash)
+    }
+
+    pub fn verify_tree_objects_exist(&self, tree: &Tree) -> Result<usize, String> {
+        let mut count = 0;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(std::rc::Rc::clone(&tree.root));
+
+        while let Some(node_ref) = queue.pop_front() {
+            let node = node_ref.borrow();
+            if let Some(h) = node.self_hash {
+                let hex = h.to_hex();
+                if !self.object_exists(hex.as_str()) {
+                    return Err(format!("node '{}' object {} does not exist", node.id, hex));
+                }
+                count += 1;
+            }
+            for (meta_name, meta_ref) in &node.meta {
+                if let Some(mh) = meta_ref.borrow().self_hash {
+                    let hex = mh.to_hex();
+                    if !self.meta_object_exists(hex.as_str()) {
+                        return Err(format!(
+                            "node '{}' meta '{}' object {} does not exist",
+                            node.id, meta_name, hex
+                        ));
+                    }
+                    count += 1;
+                }
+            }
+            match &node.children {
+                crate::core::tree::Children::Attributes(map)
+                | crate::core::tree::Children::Files(map) => {
+                    for child in map.values() {
+                        queue.push_back(std::rc::Rc::clone(child));
+                    }
+                }
+                crate::core::tree::Children::None => {}
+            }
+        }
+        Ok(count)
     }
 }
 

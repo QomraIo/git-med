@@ -1,5 +1,4 @@
 use crate::core::tree::{Children, NodeRef};
-use crate::files::types::ObjectType;
 use crate::files::utils::read_object_bytes_in;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
@@ -120,14 +119,11 @@ impl Qomra {
     }
 }
 
-/// Return `true` if `path`'s filename matches `meta.*.json` (including `meta.json`).
+/// Return `true` if `path`'s filename matches `meta.*.json` (including `meta.json` and `<id>.json`).
 pub fn is_metafile(path: &Path) -> bool {
     path.file_name()
         .and_then(|f| f.to_str())
-        .map_or(false, |s| {
-            let parts: Vec<&str> = s.split('.').collect();
-            parts.len() >= 2 && parts[0] == "meta" && parts[parts.len() - 1] == "json"
-        })
+        .map_or(false, |s| s.ends_with(".json"))
 }
 
 fn normalized_depth(path: &Path) -> usize {
@@ -259,6 +255,7 @@ impl View for Qomra {
     }
 
     fn write(&self, root: &NodeRef) -> Result<(), String> {
+        crate::views::utils::clean_workspace(&self.repo_root)?;
         self.write_node(root, &self.repo_root)
     }
 }
@@ -266,6 +263,7 @@ impl View for Qomra {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::types::ObjectType;
     use std::fs::remove_dir_all;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;

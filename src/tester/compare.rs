@@ -240,13 +240,28 @@ fn compare_node_hashes(
         });
     }
 
-    if a.meta_hash != b.meta_hash {
+    if a.meta_hash.is_some() && b.meta_hash.is_some() && a.meta_hash != b.meta_hash {
         return Err(TreeHashDiff {
-            path: current_path,
+            path: current_path.clone(),
             hash_type: "meta_hash",
             hash_a: a.meta_hash,
             hash_b: b.meta_hash,
         });
+    }
+
+    for (key, meta_a) in &a.meta {
+        if let Some(meta_b) = b.meta.get(key) {
+            let h_a = meta_a.borrow().self_hash;
+            let h_b = meta_b.borrow().self_hash;
+            if h_a != h_b {
+                return Err(TreeHashDiff {
+                    path: format!("{}/meta:{}", current_path, key),
+                    hash_type: "meta_self_hash",
+                    hash_a: h_a,
+                    hash_b: h_b,
+                });
+            }
+        }
     }
 
     let map_a = match &a.children {

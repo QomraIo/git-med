@@ -53,9 +53,15 @@ pub fn generate(args: &[String]) {
             let study_per_subjects = parse_arg(5, 1);
             let series_per_study = parse_arg(6, 1);
             let file_per_series = parse_arg(7, 1);
+            let tasks: Vec<String> = if let Some(t) = args.get(8) {
+                t.split(',').map(|s| s.trim().to_string()).collect()
+            } else {
+                vec![]
+            };
+            let tasks_ref: Vec<&str> = tasks.iter().map(|s| s.as_str()).collect();
             qomra(
                 output_dir,
-                &[],
+                &tasks_ref,
                 n_subjects,
                 study_per_subjects,
                 series_per_study,

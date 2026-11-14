@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::tester::cli_runner::GitMedCli;
-use crate::tester::compare::{assert_tree_shape_eq, compare_tree_shapes};
+use crate::tester::compare::{assert_tree_hashes_eq, assert_tree_shape_eq, compare_tree_shapes};
 use crate::tester::generate::sample::{BRATS_SAMPLE, DICOM_SAMPLE};
 
 static NEXT_E2E_ID: AtomicUsize = AtomicUsize::new(0);
@@ -33,7 +33,18 @@ impl Drop for TempE2ERepo {
     }
 }
 
-/// Recursively find a tracked file on disk (excluding `.git-med`) to delete in the test.
+/// Recursively count leaf instances in the in-memory tree.
+fn count_tree_instances(node_ref: &crate::core::tree::NodeRef) -> usize {
+    let node = node_ref.borrow();
+    match &node.children {
+        crate::core::tree::Children::None => 1,
+        crate::core::tree::Children::Attributes(map) | crate::core::tree::Children::Files(map) => {
+            map.values().map(count_tree_instances).sum()
+        }
+    }
+}
+
+/// Find a tracked data file on disk (excluding `.git-med`) to delete in the test.
 fn find_first_data_file(dir: &Path) -> Option<PathBuf> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -47,6 +58,7 @@ fn find_first_data_file(dir: &Path) -> Option<PathBuf> {
             } else {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.starts_with(".view.")
+                    && !name.starts_with("meta.")
                     && (name.ends_with(".dcm")
                         || name.ends_with(".nii")
                         || name.ends_with(".nii.gz"))
@@ -59,14 +71,134 @@ fn find_first_data_file(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Recursively check whether any data files matching the view exist on disk.
-fn verify_view_files_exist(dir: &Path, view: &str) -> bool {
+/// Verify files materialized under Qomra layout: `<task>/<source>/<subject>/<study>/<series>/<instance>`.
+fn verify_qomra_files(repo_root: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    for task_name in ["data", "segmentation", "localisation"] {
+        let task_dir = repo_root.join(task_name);
+        if task_dir.is_dir() {
+            collect_qomra_instances(&task_dir, 1, &mut count);
+        }
+    }
+    if count == 0 {
+        return Err("no valid Qomra instances found in expected hierarchy".to_string());
+    }
+    Ok(count)
+}
+
+fn collect_qomra_instances(dir: &Path, depth: usize, count: &mut usize) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_qomra_instances(&path, depth + 1, count);
+            } else if depth >= 5 {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with(".view.")
+                    && !name.starts_with("meta.")
+                    && (name.ends_with(".dcm")
+                        || name.ends_with(".nii")
+                        || name.ends_with(".nii.gz"))
+                {
+                    *count += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Verify files materialized under DICOM layout: `<subject>/<study>/<series>/<instance>.dcm` with sidecars.
+fn verify_dicom_files(repo_root: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    scan_dicom_rec(repo_root, &mut count);
+    if count == 0 {
+        return Err("no valid DICOM instances with sidecars found".to_string());
+    }
+    Ok(count)
+}
+
+fn scan_dicom_rec(dir: &Path, count: &mut usize) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != ".git-med" {
+                    scan_dicom_rec(&path, count);
+                }
+            } else {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with(".view.") && name.ends_with(".dcm") {
+                    if let Some(parent) = path.parent() {
+                        let sidecar = parent.join(format!(".view.{}", name));
+                        if sidecar.is_file() {
+                            if let Ok(content) = fs::read_to_string(&sidecar) {
+                                if !content.trim().is_empty() {
+                                    *count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Verify files materialized under BraTs layout: `<subject>/[<study>/]<instance>.nii.gz` with sidecars.
+fn verify_brats_files(repo_root: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    scan_brats_rec(repo_root, &mut count);
+    if count == 0 {
+        return Err("no valid BraTs instances with sidecars found".to_string());
+    }
+    Ok(count)
+}
+
+fn scan_brats_rec(dir: &Path, count: &mut usize) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != ".git-med" {
+                    scan_brats_rec(&path, count);
+                }
+            } else {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with(".view.") && (name.ends_with(".nii") || name.ends_with(".nii.gz")) {
+                    if let Some(parent) = path.parent() {
+                        let sidecar = parent.join(format!(".view.{}", name));
+                        if sidecar.is_file() {
+                            if let Ok(content) = fs::read_to_string(&sidecar) {
+                                if !content.trim().is_empty() {
+                                    *count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Verify that files on disk conform to the target view's directory structure and sidecars.
+fn verify_view_layout(dir: &Path, view: &str) -> Result<usize, String> {
+    match view {
+        "qomra" => verify_qomra_files(dir),
+        "dicom" => verify_dicom_files(dir),
+        "brats" => verify_brats_files(dir),
+        _ => Err(format!("unknown view: {}", view)),
+    }
+}
+
+/// Verify that a specific named instance exists on disk in the target view layout.
+fn verify_instance_exists_in_view(dir: &Path, view: &str, instance_name: &str) -> bool {
     let mut found = false;
-    check_view_files_rec(dir, view, &mut found);
+    scan_for_instance_rec(dir, view, instance_name, &mut found);
     found
 }
 
-fn check_view_files_rec(dir: &Path, view: &str, found: &mut bool) {
+fn scan_for_instance_rec(dir: &Path, view: &str, target_name: &str, found: &mut bool) {
     if *found {
         return;
     }
@@ -75,33 +207,41 @@ fn check_view_files_rec(dir: &Path, view: &str, found: &mut bool) {
             let path = entry.path();
             if path.is_dir() {
                 if entry.file_name() != ".git-med" {
-                    check_view_files_rec(&path, view, found);
+                    scan_for_instance_rec(&path, view, target_name, found);
                 }
             } else {
                 let name = entry.file_name().to_string_lossy().to_string();
-                match view {
-                    "dicom" => {
-                        if name.ends_with(".dcm") {
-                            *found = true;
-                            return;
+                if !name.starts_with(".view.") && name.contains(target_name) {
+                    match view {
+                        "dicom" => {
+                            if name.ends_with(".dcm") {
+                                if let Some(parent) = path.parent() {
+                                    if parent.join(format!(".view.{}", name)).is_file() {
+                                        *found = true;
+                                        return;
+                                    }
+                                }
+                            }
                         }
-                    }
-                    "brats" => {
-                        if name.ends_with(".nii") || name.ends_with(".nii.gz") {
-                            *found = true;
-                            return;
+                        "brats" => {
+                            if name.ends_with(".nii") || name.ends_with(".nii.gz") {
+                                if let Some(parent) = path.parent() {
+                                    if parent.join(format!(".view.{}", name)).is_file() {
+                                        *found = true;
+                                        return;
+                                    }
+                                }
+                            }
                         }
-                    }
-                    "qomra" => {
-                        if name.ends_with(".nii")
-                            || name.ends_with(".nii.gz")
-                            || name.ends_with(".dcm")
-                        {
-                            *found = true;
-                            return;
+                        "qomra" => {
+                            let path_str = path.to_string_lossy();
+                            if path_str.contains("data") || path_str.contains("segmentation") {
+                                *found = true;
+                                return;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -112,13 +252,22 @@ fn check_view_files_rec(dir: &Path, view: &str, found: &mut bool) {
 fn create_new_instance_in_view(repo_root: &Path, view: &str, instance_name: &str) -> PathBuf {
     match view {
         "brats" => {
-            // Find a subject directory
             let mut target_dir = repo_root.to_path_buf();
             if let Ok(entries) = fs::read_dir(repo_root) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() && entry.file_name() != ".git-med" {
-                        target_dir = path;
+                        if let Ok(sub_entries) = fs::read_dir(&path) {
+                            for sub in sub_entries.flatten() {
+                                if sub.path().is_dir() {
+                                    target_dir = sub.path();
+                                    break;
+                                }
+                            }
+                        }
+                        if target_dir == repo_root {
+                            target_dir = path;
+                        }
                         break;
                     }
                 }
@@ -130,7 +279,6 @@ fn create_new_instance_in_view(repo_root: &Path, view: &str, instance_name: &str
             inst_file
         }
         "dicom" => {
-            // Find a series directory or create one under subject_001/study_001/series_001
             let series_dir = repo_root
                 .join("subject_001")
                 .join("study_001")
@@ -158,8 +306,11 @@ fn create_new_instance_in_view(repo_root: &Path, view: &str, instance_name: &str
     }
 }
 
-/// Generic E2E workflow runner executing strictly `git-med` CLI commands.
-/// Sequence: v1 -> delete -> commit -> v2 -> v3 (create instance) -> v1
+/// Generic E2E workflow runner executing strictly `git-med` CLI subprocess commands.
+/// Sequence: Init V1 -> Add -> Commit -> Branch feature -> Delete -> Add -> Commit
+///           -> Switch V2 & verify files -> Switch V3 & verify files
+///           -> Create instance + .view in V3 -> Add -> Commit
+///           -> Switch V1 & verify files + new instance
 pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     let repo_temp = TempE2ERepo::new(&format!("{}_{}_{}", v1, v2, v3));
     let cli = GitMedCli::new(&repo_temp.path);
@@ -172,41 +323,85 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     assert_eq!(cli.read_current_view().expect("read VIEW"), v1);
     assert_eq!(cli.read_head().expect("read HEAD"), "ref: refs/heads/main");
 
-    // 2. Generate initial sample data and add (2 files per series so 1 remains after deleting 1)
+    // 2. Generate initial sample data (2 files per series so 1 remains after deleting 1)
     cli.generate_for_view(v1, ".", 1, 1, 1, 2)
         .expect("git-med generate failed");
+
+    // For Qomra, also add a metadata file to exercise metafile indexing and meta_objects verification
+    if v1 == "qomra" {
+        let meta_path = repo_temp.path.join("data/clinic/meta.clinic.json");
+        fs::write(&meta_path, r#"{"dept":"radiology","test":"e2e"}"#)
+            .expect("write qomra clinic meta");
+    }
+
     cli.add().expect("git-med add failed");
 
     // Verify objects and index file
-    assert!(
-        cli.count_objects() > 0,
-        "objects should exist after initial add"
-    );
+    assert!(cli.index_file_exists(), ".git-med/index must exist after add");
+    assert!(cli.index_file_size() > 0, ".git-med/index must be non-empty");
+    assert!(cli.count_objects() > 0, "objects must exist after initial add");
+
     let tree_init = cli.load_index_tree().expect("load initial index tree");
-    assert_tree_shape_eq(&tree_init, &tree_init);
+    let init_instances = count_tree_instances(&tree_init.root);
+    assert!(init_instances >= 2, "initial tree must contain at least 2 instances");
+
+    // Verify that all tree nodes and meta nodes point to existing content-addressed objects
+    let verified_objs_1 = cli
+        .verify_tree_objects_exist(&tree_init)
+        .expect("all tree node objects must exist in object stores");
+    assert!(verified_objs_1 > 0);
+
+    // If Qomra or DICOM (which extracts metadata), verify meta_objects exist
+    if v1 == "qomra" || v1 == "dicom" {
+        assert!(
+            cli.count_meta_objects() > 0,
+            "meta_objects should exist for view {}",
+            v1
+        );
+    }
 
     // 3. Commit initial state
     cli.commit("initial commit").expect("git-med commit failed");
+
     let commit_hash_1 = cli
         .read_branch_ref("main")
         .expect("read refs/heads/main");
     assert_eq!(commit_hash_1.len(), 64, "commit hash must be 64-char hex");
     assert!(
         cli.object_exists(&commit_hash_1),
-        "commit object {} must exist",
+        "commit object {} must exist in objects/",
         commit_hash_1
     );
 
-    // 4. Switch branch
+    // Verify that the tree saved in the commit matches the index tree shape
+    let committed_tree_1 = cli
+        .load_commit_tree(&commit_hash_1)
+        .expect("load committed tree from commit object");
+    assert_tree_shape_eq(&tree_init, &committed_tree_1);
+
+    // After commit, index on disk was updated with computed hashes
+    let index_tree_post_commit_1 = cli.load_index_tree().expect("load post-commit index tree");
+    assert_tree_shape_eq(&index_tree_post_commit_1, &committed_tree_1);
+    assert_tree_hashes_eq(&index_tree_post_commit_1, &committed_tree_1);
+
+    // Verify objects and meta files again after commit
+    cli.verify_tree_objects_exist(&committed_tree_1)
+        .expect("all committed tree objects and meta objects must exist");
+
+    // 4. Switch branch and verify refs
     cli.branch("feature").expect("git-med branch feature failed");
     assert_eq!(
         cli.read_head().expect("read HEAD"),
-        "ref: refs/heads/feature"
+        "ref: refs/heads/feature",
+        "HEAD must point to feature branch"
     );
     let feature_ref = cli
         .read_branch_ref("feature")
         .expect("read refs/heads/feature");
-    assert_eq!(feature_ref, commit_hash_1);
+    assert_eq!(
+        feature_ref, commit_hash_1,
+        "feature branch ref must point to initial commit"
+    );
 
     // 5. Delete a file in the working directory and add
     let file_to_delete = find_first_data_file(&repo_temp.path)
@@ -214,18 +409,30 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     fs::remove_file(&file_to_delete).expect("failed to remove data file");
 
     cli.add().expect("git-med add after delete failed");
+
+    // Verify objects and index file after delete
+    assert!(cli.index_file_exists(), ".git-med/index must exist after delete add");
     let tree_after_delete = cli
         .load_index_tree()
         .expect("load index tree after delete");
+    let del_instances = count_tree_instances(&tree_after_delete.root);
+    assert_eq!(
+        del_instances,
+        init_instances - 1,
+        "instance count in index tree must decrease by exactly 1"
+    );
 
-    // Verify that the tree shape changed (deleted file removed from index)
-    let shape_res = compare_tree_shapes(&tree_init, &tree_after_delete);
+    // Verify that the tree shape changed
+    let shape_diff = compare_tree_shapes(&tree_init, &tree_after_delete);
     assert!(
-        shape_res.is_err(),
+        shape_diff.is_err(),
         "tree shape must differ after deleting a file"
     );
 
-    // 6. Commit on feature branch
+    cli.verify_tree_objects_exist(&tree_after_delete)
+        .expect("objects for tree after delete must exist");
+
+    // 6. Commit on feature branch and verify objects and meta files
     cli.commit("delete file on feature branch")
         .expect("commit after delete failed");
     let commit_hash_2 = cli
@@ -237,40 +444,64 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     );
     assert!(
         cli.object_exists(&commit_hash_2),
-        "commit object {} must exist",
+        "second commit object {} must exist",
         commit_hash_2
     );
+
+    let committed_tree_2 = cli
+        .load_commit_tree(&commit_hash_2)
+        .expect("load committed tree 2");
+    assert_tree_shape_eq(&tree_after_delete, &committed_tree_2);
+
+    let index_tree_post_commit_2 = cli.load_index_tree().expect("load post-commit index tree 2");
+    assert_tree_shape_eq(&index_tree_post_commit_2, &committed_tree_2);
+    assert_tree_hashes_eq(&index_tree_post_commit_2, &committed_tree_2);
+    cli.verify_tree_objects_exist(&committed_tree_2)
+        .expect("objects and meta objects for commit 2 must exist");
 
     // 7. Switch view to V2 and verify files
     cli.view(Some(v2)).expect("switch to V2 failed");
     assert_eq!(cli.read_current_view().expect("read VIEW"), v2);
-    assert!(
-        verify_view_files_exist(&repo_temp.path, v2),
-        "files for view {} must exist after switching",
-        v2
-    );
+    let v2_instance_count = verify_view_layout(&repo_temp.path, v2)
+        .unwrap_or_else(|e| panic!("failed to verify files in view {}: {}", v2, e));
+    assert!(v2_instance_count > 0, "view {} must materialize instances", v2);
 
     // 8. Switch view to V3 and verify files
     cli.view(Some(v3)).expect("switch to V3 failed");
     assert_eq!(cli.read_current_view().expect("read VIEW"), v3);
-    assert!(
-        verify_view_files_exist(&repo_temp.path, v3),
-        "files for view {} must exist after switching",
-        v3
-    );
+    let v3_instance_count = verify_view_layout(&repo_temp.path, v3)
+        .unwrap_or_else(|e| panic!("failed to verify files in view {}: {}", v3, e));
+    assert!(v3_instance_count > 0, "view {} must materialize instances", v3);
 
     // 9. Create a new instance and .view file, add, commit and verify
+    let count_before = count_tree_instances(&cli.load_index_tree().expect("load tree before new instance").root);
     let new_instance_file =
         create_new_instance_in_view(&repo_temp.path, v3, "e2e_extra_instance");
     assert!(
         new_instance_file.exists(),
-        "new instance file must exist on disk"
+        "new instance file must exist on disk: {}",
+        new_instance_file.display()
     );
 
     cli.add().expect("git-med add after new instance failed");
     let tree_after_new_instance = cli
         .load_index_tree()
         .expect("load index tree after new instance");
+    let new_inst_count = count_tree_instances(&tree_after_new_instance.root);
+    assert_eq!(
+        new_inst_count,
+        count_before + 1,
+        "tree instance count must increase by 1 after adding new instance"
+    );
+
+    // Verify tree shape differs from post-delete tree
+    assert!(
+        compare_tree_shapes(&tree_after_delete, &tree_after_new_instance).is_err(),
+        "tree shape must change after adding new instance"
+    );
+
+    cli.verify_tree_objects_exist(&tree_after_new_instance)
+        .expect("objects for tree after new instance must exist");
 
     cli.commit("add new instance in V3")
         .expect("commit after new instance failed");
@@ -287,17 +518,35 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
         commit_hash_3
     );
 
-    // 10. Switch view back to V1 and verify
+    let committed_tree_3 = cli
+        .load_commit_tree(&commit_hash_3)
+        .expect("load committed tree 3");
+    assert_tree_shape_eq(&tree_after_new_instance, &committed_tree_3);
+
+    let index_tree_post_commit_3 = cli.load_index_tree().expect("load post-commit index tree 3");
+    assert_tree_shape_eq(&index_tree_post_commit_3, &committed_tree_3);
+    assert_tree_hashes_eq(&index_tree_post_commit_3, &committed_tree_3);
+    cli.verify_tree_objects_exist(&committed_tree_3)
+        .expect("objects and meta objects for commit 3 must exist");
+
+    // 10. Switch view back to V1 and verify files
     cli.view(Some(v1)).expect("switch back to V1 failed");
     assert_eq!(cli.read_current_view().expect("read VIEW"), v1);
+
+    let v1_final_count = verify_view_layout(&repo_temp.path, v1)
+        .unwrap_or_else(|e| panic!("failed to verify files in view {} after switch-back: {}", v1, e));
+    assert!(v1_final_count > 0, "view {} must materialize instances after switch back", v1);
+
+    // Crucially verify that the new instance created in V3 is now materialized in V1's layout
     assert!(
-        verify_view_files_exist(&repo_temp.path, v1),
-        "files for view {} must exist after switching back",
+        verify_instance_exists_in_view(&repo_temp.path, v1, "e2e_extra_instance"),
+        "newly added instance 'e2e_extra_instance' must be materialized on disk in view {}",
         v1
     );
 
-    // 11. Final Tree shape check
-    assert_tree_shape_eq(&tree_after_new_instance, &tree_after_new_instance);
+    // Final Tree comparison: verify index tree and commit tree match in both shape and hashes
+    assert_tree_shape_eq(&index_tree_post_commit_3, &committed_tree_3);
+    assert_tree_hashes_eq(&index_tree_post_commit_3, &committed_tree_3);
 }
 
 #[cfg(test)]

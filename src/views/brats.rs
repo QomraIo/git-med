@@ -186,6 +186,7 @@ impl View for Brats {
     }
 
     fn write(&self, root: &NodeRef) -> Result<(), String> {
+        crate::views::utils::clean_workspace(&self.repo_root)?;
         let mut instances = Vec::new();
         collect_instances(root, 0, "", "", "", "", "", &mut instances)?;
 
