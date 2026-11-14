@@ -8,3 +8,5 @@ blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
 mmap = "0.1.1"
 rayon = "1.12.0"
 regex = "1.13.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

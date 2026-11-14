@@ -22,7 +22,7 @@ pub fn get_view(view: &str) -> Option<Box<dyn View>> {
 pub fn get_view_in(view: &str, repo_root: &Path) -> Option<Box<dyn View>> {
     match view {
         "brats" => Some(Box::new(Brats::new(repo_root))),
-        "dicom" => Some(Box::new(Dicom::default())),
+        "dicom" => Some(Box::new(Dicom::new(repo_root))),
         "qomra" => Some(Box::new(Qomra::new(repo_root))),
         _ => None,
     }

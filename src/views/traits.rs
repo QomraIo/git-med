@@ -57,4 +57,8 @@ pub trait View {
     ) -> Result<(), ()>;
 
     fn write(&self, root: &NodeRef) -> Result<(), String>;
+
+    fn post_add(&self, _root: &NodeRef) -> Result<(), String> {
+        Ok(())
+    }
 }

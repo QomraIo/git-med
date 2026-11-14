@@ -313,6 +313,8 @@ pub fn add_in(repo_root: &Path) -> Result<(), String> {
     dfs_in(repo_root, &tree.root, view.as_mut())?;
     tree.prune_unvisited();
 
+    view.post_add(&tree.root)?;
+
     tree.save(&lock.path)
         .map_err(|e| format!("failed to save {}: {}", lock.path.display(), e))?;
     fs::rename(&lock.path, &index_path)
