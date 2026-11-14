@@ -7,6 +7,7 @@ use core::add::add;
 use core::branch::branch;
 use core::commit::commit;
 use core::init::init;
+use core::view::view;
 use std::env;
 use tester::generate::generate;
 
@@ -25,6 +26,7 @@ fn main() {
         "add" => add(&args),
         "commit" => commit(&args),
         "branch" => branch(&args),
+        "view" => view(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }
