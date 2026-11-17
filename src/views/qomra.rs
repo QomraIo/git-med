@@ -410,7 +410,7 @@ mod tests {
 
         // 2. Root metadata file (meta.json)
         let root_meta_payload = b"{\"repo\": \"root_meta\"}";
-        let root_meta_hash = blake3::hash(root_meta_payload);
+        let root_meta_hash = crate::files::hash::hash_raw(root_meta_payload);
         make_object_from_bytes_in(
             root_meta_payload,
             root_meta_hash,
@@ -435,7 +435,7 @@ mod tests {
 
         // Meta on clinic folder: "meta.clinic.json"
         let clinic_meta_payload = b"{\"clinic\": \"data_meta\"}";
-        let clinic_meta_hash = blake3::hash(clinic_meta_payload);
+        let clinic_meta_hash = crate::files::hash::hash_raw(clinic_meta_payload);
         make_object_from_bytes_in(
             clinic_meta_payload,
             clinic_meta_hash,
@@ -461,7 +461,7 @@ mod tests {
         let leaf_id = "slice.dcm";
         let leaf_node = Node::new(leaf_id, ChildrenType::None);
         let leaf_blob_payload = b"SAMPLE DICOM BLOB CONTENT";
-        let leaf_blob_hash = blake3::hash(leaf_blob_payload);
+        let leaf_blob_hash = crate::files::hash::hash_raw(leaf_blob_payload);
         make_object_from_bytes_in(
             leaf_blob_payload,
             leaf_blob_hash,

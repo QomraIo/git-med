@@ -9,7 +9,7 @@ use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use blake3::Hash;
+use crate::files::hash::{ActiveAlgorithm, Hash};
 
 use crate::files::commit::{save_tree, save_tree_in};
 use crate::files::types::FileMetadata;
@@ -389,11 +389,11 @@ impl Tree {
         self.root.borrow_mut().prune_unvisited()
     }
 
-    pub fn hash(&self) -> blake3::Hash {
+    pub fn hash(&self) -> Hash {
         save_tree(self.root.clone()).unwrap()
     }
 
-    pub fn hash_in(&self, repo_root: &Path) -> Result<blake3::Hash, String> {
+    pub fn hash_in(&self, repo_root: &Path) -> Result<Hash, String> {
         save_tree_in(self.root.clone(), repo_root)
     }
 }
@@ -570,9 +570,10 @@ fn read_opt_hash<R: Read>(present: bool, reader: &mut R) -> Result<Option<Hash>,
     if !present {
         return Ok(None);
     }
-    let mut buf = [0u8; 32];
+    let mut buf = vec![0u8; ActiveAlgorithm::DIGEST_LEN];
     reader.read_exact(&mut buf)?;
-    Ok(Some(Hash::from_bytes(buf)))
+    let hash = Hash::from_bytes(&buf).map_err(|e| TreeError::CorruptedData(e.to_string()))?;
+    Ok(Some(hash))
 }
 
 fn write_opt_file_metadata<W: Write>(
@@ -845,6 +846,7 @@ pub fn load_or_init_tree(index_path: &Path) -> Result<Tree, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::hash::hash_raw;
     use std::error::Error;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -909,9 +911,9 @@ mod tests {
     #[test]
     fn test_single_node_stream_roundtrip() {
         let node_id = "1";
-        let self_hash = blake3::hash(b"self_hash_123");
-        let meta_hash = blake3::hash(b"meta_hash_456");
-        let child_hash = blake3::hash(b"child_hash_789");
+        let self_hash = hash_raw(b"self_hash_123");
+        let meta_hash = hash_raw(b"meta_hash_456");
+        let child_hash = hash_raw(b"child_hash_789");
 
         let node = Node::new(node_id, ChildrenType::None);
         {
@@ -1233,7 +1235,7 @@ mod tests {
     fn test_truncated_file() {
         let root = Node::new("0", ChildrenType::Attributes);
         let child = Node::insert(&root, ChildType::Id("1".to_string())).unwrap();
-        child.borrow_mut().self_hash = Some(blake3::hash(b"child"));
+        child.borrow_mut().self_hash = Some(hash_raw(b"child"));
 
         let mut buf = Vec::new();
         Tree::from_root(root).write_to(&mut buf).unwrap();
@@ -1394,7 +1396,7 @@ mod tests {
     #[test]
     fn test_write_subtree_and_load_subtree() {
         let node = Node::new("42", ChildrenType::None);
-        let expected_hash = blake3::hash(b"subtree_hash");
+        let expected_hash = hash_raw(b"subtree_hash");
         node.borrow_mut().self_hash = Some(expected_hash);
 
         let mut buf = Vec::new();
@@ -1410,7 +1412,7 @@ mod tests {
     fn test_load_subtree_with_parent() {
         let parent = Node::new("1", ChildrenType::Attributes);
         let child = Node::new("2", ChildrenType::None);
-        let expected_hash = blake3::hash(b"child_hash");
+        let expected_hash = hash_raw(b"child_hash");
         child.borrow_mut().self_hash = Some(expected_hash);
 
         let mut buf = Vec::new();
@@ -1455,7 +1457,7 @@ mod tests {
         let file_path = temp_dir.path.join("node_tree.bin");
 
         let node = Node::new("88", ChildrenType::None);
-        let expected_hash = blake3::hash(b"node_save_test");
+        let expected_hash = hash_raw(b"node_save_test");
         node.borrow_mut().self_hash = Some(expected_hash);
 
         node.borrow().save(&file_path).expect("Node::save failed");
@@ -1584,12 +1586,12 @@ mod tests {
         let meta_json_id = "2";
 
         let readme = get_or_insert_meta(&root, readme_id);
-        let readme_hash = blake3::hash(b"readme");
+        let readme_hash = hash_raw(b"readme");
         readme.borrow_mut().self_hash = Some(readme_hash);
         readme.borrow_mut().visited = true;
 
         let meta_json = get_or_insert_meta(&root, meta_json_id);
-        let meta_hash = blake3::hash(b"meta_json");
+        let meta_hash = hash_raw(b"meta_json");
         meta_json.borrow_mut().self_hash = Some(meta_hash);
 
         // Calling get_or_insert_meta again returns the same NodeRef.

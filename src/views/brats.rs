@@ -1,4 +1,5 @@
 use crate::core::tree::{Children, NodeRef};
+use crate::files::hash::Hash;
 use crate::files::utils::read_object_bytes_in;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
@@ -257,7 +258,7 @@ struct InstanceEntry {
     study: String,
     series: String,
     instance: String,
-    blob_hash: blake3::Hash,
+    blob_hash: Hash,
 }
 
 fn collect_instances(

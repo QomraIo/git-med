@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+pub use crate::files::hash::{
+    ActiveAlgorithm, Hash, HashAlgorithm, HashError, hash, hash_bytes, hash_raw, object_header,
+};
 use crate::files::types::{FileMetadata, ObjectType};
-use blake3::Hash;
 use std::fs::File;
 use std::fs::{self, OpenOptions, symlink_metadata};
 use std::io::Result;
@@ -10,10 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const IO_BUFFER_SIZE: usize = 64 * 1024;
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn object_header(obj_type: ObjectType, byte_len: u64) -> Vec<u8> {
-    format!("{} {}\0", obj_type.header_prefix(), byte_len).into_bytes()
-}
 
 pub fn time_format(time_: SystemTime) -> (u64, u32) {
     let duration = time_
@@ -37,31 +36,6 @@ pub fn get_file_metadata(path: &Path) -> FileMetadata {
         mtime,
         size: Some(size),
     }
-}
-
-/// Compute the Git-style single-pass BLAKE3 object hash (`"<type> <len>\0" || content`).
-pub fn hash(path: &Path, size: Option<u64>, obj_type: ObjectType) -> Hash {
-    // in future size will be used to chose rayon, mmap or not
-    let byte_len = match size {
-        Some(len) => len,
-        None => fs::metadata(path)
-            .expect("Failed to read file metadata")
-            .len(),
-    };
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&object_header(obj_type, byte_len));
-    hasher.update_mmap_rayon(path).expect("Failed to hash file");
-
-    hasher.finalize()
-}
-
-/// Compute the Git-style single-pass BLAKE3 object hash from in-memory bytes (`"<type> <len>\0" || bytes`).
-pub fn hash_bytes(bytes: &[u8], obj_type: ObjectType) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&object_header(obj_type, bytes.len() as u64));
-    hasher.update(bytes);
-    hasher.finalize()
 }
 
 /// Write a Git-style uncompressed object atomically under `.git-med/objects/{dir}/{filename}`.
@@ -311,7 +285,7 @@ mod tests {
             let mut expected_bytes =
                 format!("{} {}\0", obj_type.header_prefix(), payload.len()).into_bytes();
             expected_bytes.extend_from_slice(payload);
-            let expected_digest = blake3::hash(&expected_bytes);
+            let expected_digest = hash_raw(&expected_bytes);
 
             assert_eq!(digest_auto, expected_digest);
             assert_eq!(digest_with_size, expected_digest);
@@ -354,7 +328,7 @@ mod tests {
                 format!("{} {}\0", obj_type.header_prefix(), payload.len()).into_bytes();
             expected.extend_from_slice(payload);
             assert_eq!(obj_bytes, expected);
-            assert_eq!(blake3::hash(&obj_bytes), digest);
+            assert_eq!(hash_raw(&obj_bytes), digest);
 
             let entries: Vec<_> = fs::read_dir(obj_path.parent().unwrap())
                 .unwrap()
@@ -377,7 +351,7 @@ mod tests {
         let obj_path = expected_object_path(&repo_root, digest, ObjectType::Blob);
         let obj_bytes = fs::read(&obj_path).unwrap();
         assert_eq!(obj_bytes, b"blob 0\0");
-        assert_eq!(blake3::hash(&obj_bytes), digest);
+        assert_eq!(hash_raw(&obj_bytes), digest);
     }
 
     #[test]
@@ -398,7 +372,7 @@ mod tests {
         let expected_header = format!("blob {}\0", payload.len()).into_bytes();
         assert_eq!(&obj_bytes[..expected_header.len()], &expected_header[..]);
         assert_eq!(&obj_bytes[expected_header.len()..], &payload[..]);
-        assert_eq!(blake3::hash(&obj_bytes), digest);
+        assert_eq!(hash_raw(&obj_bytes), digest);
     }
 
     #[test]
@@ -422,7 +396,7 @@ mod tests {
         let tmp = TempDir::new("missing");
         let repo_root = tmp.path.join("repo");
         let missing_src = tmp.path.join("does_not_exist.dcm");
-        let dummy_digest = blake3::hash(b"blob 0\0");
+        let dummy_digest = hash_raw(b"blob 0\0");
 
         let err = make_object_in(&missing_src, dummy_digest, ObjectType::Blob, &repo_root)
             .unwrap_err();

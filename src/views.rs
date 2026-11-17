@@ -269,7 +269,7 @@ mod tests {
 
         {
             let mut n = node.borrow_mut();
-            n.self_hash = Some(blake3::hash(b"data"));
+            n.self_hash = Some(crate::files::hash::hash_raw(b"data"));
             n.node_metadata = meta;
         }
         // Unchanged metadata should skip re-hashing.
@@ -310,7 +310,7 @@ mod tests {
         let node = Node::new("2", ChildrenType::None);
         {
             let mut n = node.borrow_mut();
-            n.self_hash = Some(blake3::hash(b"hello"));
+            n.self_hash = Some(crate::files::hash::hash_raw(b"hello"));
             n.node_metadata = meta;
             n.visited = false;
         }

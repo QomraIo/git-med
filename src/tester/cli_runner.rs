@@ -186,7 +186,7 @@ impl GitMedCli {
     }
 
     pub fn load_commit_tree(&self, commit_hash_hex: &str) -> Result<Tree, String> {
-        let hash = blake3::Hash::from_hex(commit_hash_hex)
+        let hash = crate::files::hash::Hash::from_hex(commit_hash_hex)
             .map_err(|e| format!("invalid commit hash {}: {}", commit_hash_hex, e))?;
         crate::files::commit::load_tree_from_commit_in(&self.repo_root, &hash)
     }

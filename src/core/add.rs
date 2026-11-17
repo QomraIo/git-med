@@ -336,7 +336,7 @@ mod tests {
     use crate::core::init::init_at;
     use crate::core::tree::{Children, Tree};
     use crate::files::types::ObjectType;
-    use crate::files::utils::hash;
+    use crate::files::utils::{Hash, hash};
     use crate::tester::generate::sample::qomra;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -385,7 +385,7 @@ mod tests {
     fn expected_object_file(
         repo_root: &Path,
         obj_type: ObjectType,
-        digest: &blake3::Hash,
+        digest: &Hash,
     ) -> PathBuf {
         let hex = digest.to_hex();
         repo_root

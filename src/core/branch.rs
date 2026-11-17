@@ -4,7 +4,7 @@ use crate::files::commit::load_tree_from_commit_in;
 #[allow(unused_imports)]
 pub use crate::files::commit::load_tree_from_commit;
 use crate::views::get_view_in;
-use blake3::Hash;
+use crate::files::hash::Hash;
 use std::fs::{self, File};
 use std::path::Path;
 

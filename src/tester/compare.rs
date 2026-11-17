@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::core::tree::{Children, NodeRef, Tree};
-use blake3::Hash;
+use crate::files::hash::Hash;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapeDiffKind {
@@ -414,6 +414,7 @@ pub fn assert_trees_equal(tree_a: &Tree, tree_b: &Tree) {
 mod tests {
     use super::*;
     use crate::core::tree::{ChildrenType, Node};
+    use crate::files::hash::hash_raw;
 
     #[test]
     fn test_compare_identical_trees() {
@@ -451,8 +452,8 @@ mod tests {
         let tree1 = Tree::new("root");
         let tree2 = Tree::new("root");
 
-        let hash_a = blake3::hash(b"data A");
-        let hash_b = blake3::hash(b"data B");
+        let hash_a = hash_raw(b"data A");
+        let hash_b = hash_raw(b"data B");
 
         tree1.root.borrow_mut().self_hash = Some(hash_a);
         tree2.root.borrow_mut().self_hash = Some(hash_b);

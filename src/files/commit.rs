@@ -1,7 +1,7 @@
 use crate::core::tree::{Children, ChildrenType, Node, NodeRef, Tree};
 use crate::files::types::ObjectType;
 use crate::files::utils::{hash_bytes, make_object_from_bytes_in, read_object_bytes_in};
-use blake3::Hash;
+use crate::files::hash::Hash;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::rc::Rc;
@@ -256,7 +256,7 @@ pub fn load_tree_node_in(
     Ok(current_node)
 }
 
-pub fn save_tree_in(root: NodeRef, repo_root: &Path) -> Result<blake3::Hash, String> {
+pub fn save_tree_in(root: NodeRef, repo_root: &Path) -> Result<Hash, String> {
     let mut pending = needs_hash(Rc::clone(&root));
 
     // If nothing needed rehashing, return root's existing hash if available
@@ -289,7 +289,7 @@ pub fn save_tree_in(root: NodeRef, repo_root: &Path) -> Result<blake3::Hash, Str
         .ok_or_else(|| "Root missing self_hash after save_tree".to_string())
 }
 
-pub fn save_tree(root: NodeRef) -> Result<blake3::Hash, String> {
+pub fn save_tree(root: NodeRef) -> Result<Hash, String> {
     save_tree_in(root, Path::new("."))
 }
 
@@ -297,6 +297,7 @@ pub fn save_tree(root: NodeRef) -> Result<blake3::Hash, String> {
 mod tests {
     use super::*;
     use crate::core::tree::{ChildrenType, Node};
+    use crate::files::hash::hash_raw;
     use std::fs;
     use std::path::PathBuf;
 
@@ -351,12 +352,12 @@ mod tests {
         let series = Node::new("series_1", ChildrenType::Files);
         let leaf_file = Node::new("leaf.nii", ChildrenType::None);
 
-        let file_blob_hash = blake3::hash(b"test file content");
+        let file_blob_hash = hash_raw(b"test file content");
         leaf_file.borrow_mut().self_hash = Some(file_blob_hash);
         leaf_file.borrow_mut().valid_self_hash = true;
 
         let meta_file = Node::new("meta.json", ChildrenType::None);
-        let meta_hash = blake3::hash(b"test meta content");
+        let meta_hash = hash_raw(b"test meta content");
         meta_file.borrow_mut().self_hash = Some(meta_hash);
         meta_file.borrow_mut().valid_self_hash = true;
 
@@ -412,7 +413,7 @@ mod tests {
         let valid_sub = Node::new("1", ChildrenType::Files);
         let invalid_sub = Node::new("2", ChildrenType::Files);
 
-        let precomputed_hash = blake3::hash(b"already valid");
+        let precomputed_hash = hash_raw(b"already valid");
         valid_sub.borrow_mut().self_hash = Some(precomputed_hash);
         valid_sub.borrow_mut().valid_self_hash = true;
         valid_sub.borrow_mut().valid_child_hash = true;
@@ -444,11 +445,11 @@ mod tests {
         let root = Node::new("0", ChildrenType::Attributes);
 
         let meta_b = Node::new("meta_b", ChildrenType::None);
-        let meta_b_hash = blake3::hash(b"meta B");
+        let meta_b_hash = hash_raw(b"meta B");
         meta_b.borrow_mut().self_hash = Some(meta_b_hash);
 
         let meta_a = Node::new("meta_a", ChildrenType::None);
-        let meta_a_hash = blake3::hash(b"meta A");
+        let meta_a_hash = hash_raw(b"meta A");
         meta_a.borrow_mut().self_hash = Some(meta_a_hash);
 
         // Insert in reverse key order
@@ -456,11 +457,11 @@ mod tests {
         root.borrow_mut().meta.insert("meta_a".to_string(), meta_a);
 
         let child_b = Node::new("child_b", ChildrenType::None);
-        let child_b_hash = blake3::hash(b"child B");
+        let child_b_hash = hash_raw(b"child B");
         child_b.borrow_mut().self_hash = Some(child_b_hash);
 
         let child_a = Node::new("child_a", ChildrenType::None);
-        let child_a_hash = blake3::hash(b"child A");
+        let child_a_hash = hash_raw(b"child A");
         child_a.borrow_mut().self_hash = Some(child_a_hash);
 
         // Insert in reverse key order

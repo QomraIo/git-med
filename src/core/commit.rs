@@ -1,7 +1,7 @@
 use crate::core::tree::load_or_fail_tree;
 use crate::files::types::ObjectType;
 use crate::files::utils::{hash_bytes, make_object_from_bytes_in};
-use blake3::Hash;
+use crate::files::hash::Hash;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -227,6 +227,7 @@ pub fn commit_with_message_in(repo_root: &Path, message: &str) -> Result<Hash, S
 mod tests {
     use super::*;
     use crate::core::init::init_at;
+    use crate::files::hash::hash_raw;
     use std::path::PathBuf;
 
     struct TempRepo {
@@ -259,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_format_commit_body_initial() {
-        let tree_hash = blake3::hash(b"tree root");
+        let tree_hash = hash_raw(b"tree root");
         let body = format_commit_body(&tree_hash, None, "Initial commit");
         let expected = format!("{}\n\nInitial commit\n", tree_hash.to_hex());
         assert_eq!(String::from_utf8_lossy(&body), expected);
@@ -267,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_format_commit_body_with_parent() {
-        let tree_hash = blake3::hash(b"tree root 2");
+        let tree_hash = hash_raw(b"tree root 2");
         let parent_hash_str = "a".repeat(64);
         let body = format_commit_body(&tree_hash, Some(&parent_hash_str), "Second commit\n");
         let expected = format!("{}\n{}\nSecond commit\n", tree_hash.to_hex(), parent_hash_str);
@@ -277,7 +278,7 @@ mod tests {
     #[test]
     fn test_commit_write_initial_and_subsequent() {
         let repo = TempRepo::new("commit_flow");
-        let tree_1 = blake3::hash(b"tree 1");
+        let tree_1 = hash_raw(b"tree 1");
 
         // 1. Initial commit (no parent)
         assert_eq!(load_head_hash_in(&repo.path).unwrap(), None);
@@ -309,7 +310,7 @@ mod tests {
         assert_eq!(load_head_hash_in(&repo.path).unwrap(), Some(hex_1.to_string()));
 
         // 2. Second commit (with parent)
-        let tree_2 = blake3::hash(b"tree 2");
+        let tree_2 = hash_raw(b"tree 2");
         let parent_hash = load_head_hash_in(&repo.path).unwrap();
         let commit_2 = Commit::new(tree_2, parent_hash, "Second commit".to_string());
         let commit_2_hash = commit_2.write_in(&repo.path).expect("second commit write");
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn test_commit_write_detached_head() {
         let repo = TempRepo::new("detached");
-        let tree_hash = blake3::hash(b"detached tree");
+        let tree_hash = hash_raw(b"detached tree");
 
         // Make HEAD detached with an initial fake commit hash
         let initial_hash = "b".repeat(64);
