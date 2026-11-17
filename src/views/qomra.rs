@@ -402,7 +402,6 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join(".git-med/objects")).unwrap();
-        fs::create_dir_all(temp_dir.join(".git-med/meta_objects")).unwrap();
 
         let qomra = Qomra::new(&temp_dir);
 

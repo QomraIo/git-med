@@ -382,7 +382,7 @@ impl View for Dicom {
                     .map_err(|e| format!("failed to read draft {}: {}", draft_file.display(), e))?;
                 let meta_hash = hash_bytes(&content, ObjectType::Meta);
 
-                // Write to .git-med/meta_objects/
+                // Write to .git-med/objects/
                 make_object_from_bytes_in(&content, meta_hash, ObjectType::Meta, &self.repo_root)
                     .map_err(|e| format!("failed to save meta object for {}: {}", id, e))?;
 
@@ -641,15 +641,15 @@ mod tests {
         let series_node = get_child(&study_node, "series_001").expect("series node");
         let instance_node = get_child(&series_node, "instance_001.dcm").expect("instance_001 node");
 
-        // 3. Ancestor nodes (subject, study, series) have meta nodes in meta_objects
+        // 3. Ancestor nodes (subject, study, series) have meta nodes in objects
         let sub_borrow = subject_node.borrow();
         assert!(sub_borrow.meta.contains_key("subject_001.json"));
         assert!(sub_borrow.meta_hash.is_some());
         assert!(sub_borrow.draft_node_metadata.is_none());
         assert!(sub_borrow.draft_meta_metadata.is_none());
         let sub_meta_hex = sub_borrow.meta_hash.unwrap().to_hex();
-        let sub_meta_obj = git_med_dir.join("meta_objects").join(&sub_meta_hex[..2]).join(&sub_meta_hex[2..]);
-        assert!(sub_meta_obj.is_file(), "subject meta object must exist in meta_objects");
+        let sub_meta_obj = git_med_dir.join("objects").join(&sub_meta_hex[..2]).join(&sub_meta_hex[2..]);
+        assert!(sub_meta_obj.is_file(), "subject meta object must exist in objects");
 
         let std_borrow = study_node.borrow();
         assert!(std_borrow.meta.contains_key("study_001.json"));

@@ -162,11 +162,6 @@ impl GitMedCli {
         count_objects_recursive(&dir)
     }
 
-    pub fn count_meta_objects(&self) -> usize {
-        let dir = self.git_med_dir().join("meta_objects");
-        count_objects_recursive(&dir)
-    }
-
     pub fn object_exists(&self, hash_hex: &str) -> bool {
         if hash_hex.len() < 3 {
             return false;
@@ -175,19 +170,6 @@ impl GitMedCli {
         let file = &hash_hex[2..];
         self.git_med_dir()
             .join("objects")
-            .join(dir)
-            .join(file)
-            .is_file()
-    }
-
-    pub fn meta_object_exists(&self, hash_hex: &str) -> bool {
-        if hash_hex.len() < 3 {
-            return false;
-        }
-        let dir = &hash_hex[..2];
-        let file = &hash_hex[2..];
-        self.git_med_dir()
-            .join("meta_objects")
             .join(dir)
             .join(file)
             .is_file()
@@ -226,7 +208,7 @@ impl GitMedCli {
             for (meta_name, meta_ref) in &node.meta {
                 if let Some(mh) = meta_ref.borrow().self_hash {
                     let hex = mh.to_hex();
-                    if !self.meta_object_exists(hex.as_str()) {
+                    if !self.object_exists(hex.as_str()) {
                         return Err(format!(
                             "node '{}' meta '{}' object {} does not exist",
                             node.id, meta_name, hex

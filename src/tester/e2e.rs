@@ -327,7 +327,7 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     cli.generate_for_view(v1, ".", 1, 1, 1, 2)
         .expect("git-med generate failed");
 
-    // For Qomra, also add a metadata file to exercise metafile indexing and meta_objects verification
+    // For Qomra, also add a metadata file to exercise metafile indexing and object verification
     if v1 == "qomra" {
         let meta_path = repo_temp.path.join("data/clinic/meta.clinic.json");
         fs::write(&meta_path, r#"{"dept":"radiology","test":"e2e"}"#)
@@ -350,15 +350,6 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
         .verify_tree_objects_exist(&tree_init)
         .expect("all tree node objects must exist in object stores");
     assert!(verified_objs_1 > 0);
-
-    // If Qomra or DICOM (which extracts metadata), verify meta_objects exist
-    if v1 == "qomra" || v1 == "dicom" {
-        assert!(
-            cli.count_meta_objects() > 0,
-            "meta_objects should exist for view {}",
-            v1
-        );
-    }
 
     // 3. Commit initial state
     cli.commit("initial commit").expect("git-med commit failed");

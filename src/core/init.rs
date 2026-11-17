@@ -24,7 +24,6 @@ pub(crate) fn init_at(repo_path: &Path) {
         git_med_path.join("refs/remotes/origin"),
         git_med_path.join("refs/tags"),
         git_med_path.join("objects"),
-        git_med_path.join("meta_objects"),
     ];
 
     for dir in &dirs {

@@ -64,12 +64,12 @@ pub fn hash_bytes(bytes: &[u8], obj_type: ObjectType) -> Hash {
     hasher.finalize()
 }
 
-/// Write a Git-style uncompressed object atomically under `.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Write a Git-style uncompressed object atomically under `.git-med/objects/{dir}/{filename}`.
 pub fn make_object(path: &Path, hash: Hash, obj_type: ObjectType) -> Result<()> {
     make_object_in(path, hash, obj_type, Path::new("."))
 }
 
-/// Write an in-memory Git-style object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Write an in-memory Git-style object atomically under `<repo_root>/.git-med/objects/{dir}/{filename}`.
 pub fn make_object_from_bytes_in(
     bytes: &[u8],
     hash: Hash,
@@ -131,7 +131,7 @@ pub fn make_object_from_bytes_in(
     Ok(())
 }
 
-/// Read an object's type and content payload from `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Read an object's type and content payload from `<repo_root>/.git-med/objects/{dir}/{filename}`.
 pub fn read_object_bytes_in(
     repo_root: &Path,
     hash: &Hash,
@@ -140,20 +140,10 @@ pub fn read_object_bytes_in(
     let dir = &hex[..2];
     let filename = &hex[2..];
 
-    let obj_path = repo_root.join(".git-med/objects").join(dir).join(filename);
-    let path = if obj_path.is_file() {
-        obj_path
-    } else {
-        let meta_path = repo_root
-            .join(".git-med/meta_objects")
-            .join(dir)
-            .join(filename);
-        if meta_path.is_file() {
-            meta_path
-        } else {
-            return Err(format!("object {} not found", hex));
-        }
-    };
+    let path = repo_root.join(".git-med/objects").join(dir).join(filename);
+    if !path.is_file() {
+        return Err(format!("object {} not found", hex));
+    }
 
     let bytes = fs::read(&path)
         .map_err(|e| format!("failed to read object {}: {}", path.display(), e))?;
@@ -190,7 +180,7 @@ pub fn read_object_bytes(hash: &Hash) -> std::result::Result<(ObjectType, Vec<u8
     read_object_bytes_in(Path::new("."), hash)
 }
 
-/// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/objects/{dir}/{filename}`.
 pub fn make_object_in(
     path: &Path,
     hash: Hash,
@@ -350,12 +340,14 @@ mod tests {
             let obj_path = expected_object_path(&repo_root, digest, obj_type);
             assert!(obj_path.exists());
 
-            let other_type = match obj_type {
-                ObjectType::Blob => ObjectType::Meta,
-                ObjectType::Meta => ObjectType::Blob,
-                ObjectType::Tree | ObjectType::Commit => ObjectType::Meta,
-            };
-            assert!(!repo_root.join(".git-med").join(other_type.dir_name()).exists());
+            assert!(!repo_root.join(".git-med/meta_objects").exists());
+            assert_eq!(
+                obj_path,
+                repo_root
+                    .join(".git-med/objects")
+                    .join(&digest.to_hex()[..2])
+                    .join(&digest.to_hex()[2..])
+            );
 
             let obj_bytes = fs::read(&obj_path).unwrap();
             let mut expected =
