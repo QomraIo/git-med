@@ -1,5 +1,6 @@
 mod core;
 mod files;
+pub mod remote;
 mod tester;
 mod views;
 
