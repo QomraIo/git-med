@@ -1,7 +1,9 @@
+use std::io::Write;
 use std::path::Path;
-use flate2::{Decompress, FlushDecompress, Status};
+use flate2::write::ZlibEncoder;
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 
-use crate::files::hash::hash_bytes;
+use crate::files::hash::{hash_bytes, hash_raw};
 use crate::files::types::ObjectType;
 use crate::files::utils::make_object_from_bytes_in;
 use crate::remote::types::RemoteError;
@@ -156,4 +158,60 @@ pub fn unpack_packfile_into(pack_bytes: &[u8], repo_root: &Path) -> Result<usize
     }
 
     Ok(unpacked_count)
+}
+
+/// Generate a Git Packfile v2 binary byte stream from a slice of objects.
+///
+/// Header: 4 bytes "PACK", 4 bytes version (2), 4 bytes object count (big-endian).
+/// Each object: variable-length LEB128 type and size header, followed by zlib-compressed payload.
+/// Trailer: abstract digest computed over all preceding packfile bytes.
+pub fn create_packfile_bytes(objects: &[(ObjectType, &[u8])]) -> Result<Vec<u8>, RemoteError> {
+    if objects.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut buf = Vec::new();
+
+    // 1. Packfile header (12 bytes)
+    buf.extend_from_slice(b"PACK");
+    buf.extend_from_slice(&2u32.to_be_bytes());
+    buf.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+
+    // 2. Encode and compress each object
+    for (obj_type, body) in objects {
+        let type_id: u8 = match obj_type {
+            ObjectType::Commit => 1,
+            ObjectType::Tree => 2,
+            ObjectType::Blob | ObjectType::Meta => 3,
+        };
+
+        // Variable-length LEB128 header:
+        // Byte 0: MSB continuation bit, 3 bits type, 4 bits size
+        let mut size = body.len();
+        let type_bits = (type_id & 0x07) << 4;
+        let size_bits = (size & 0x0F) as u8;
+        size >>= 4;
+
+        let continuation = if size > 0 { 0x80 } else { 0x00 };
+        buf.push(continuation | type_bits | size_bits);
+
+        while size > 0 {
+            let next_byte = (size & 0x7F) as u8;
+            size >>= 7;
+            let cont = if size > 0 { 0x80 } else { 0x00 };
+            buf.push(cont | next_byte);
+        }
+
+        // Deflate object payload
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body)?;
+        let compressed = encoder.finish()?;
+        buf.extend_from_slice(&compressed);
+    }
+
+    // 3. Trailer checksum (computed over all preceding bytes in packfile)
+    let checksum = hash_raw(&buf);
+    buf.extend_from_slice(checksum.as_bytes());
+
+    Ok(buf)
 }

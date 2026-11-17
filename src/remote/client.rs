@@ -7,8 +7,10 @@ use crate::remote::discovery::{
 use crate::remote::negotiation;
 use crate::remote::packfile;
 use crate::remote::pkt_line;
+use crate::remote::push;
 use crate::remote::sideband;
-use crate::remote::types::{FetchResult, RefAdvertisement, RemoteError};
+use crate::remote::traversal;
+use crate::remote::types::{FetchResult, PushResult, RefAdvertisement, RemoteError};
 
 /// HTTP transport client for interacting with remote Git servers.
 #[derive(Debug, Clone)]
@@ -262,5 +264,165 @@ impl GitHttpClient {
 
         let advertisement = self.discover_refs(repo_url).await?;
         self.fetch_and_unpack(repo_url, target_dir, &advertisement).await
+    }
+
+    /// Discover remote references for pushing via `GET $REPO_URL/info/refs?service=git-receive-pack`.
+    pub async fn discover_push_refs(&self, repo_url: &str) -> Result<RefAdvertisement, RemoteError> {
+        let trimmed_url = repo_url.trim_end_matches('/');
+        let info_refs_url = format!("{}/info/refs?service=git-receive-pack", trimmed_url);
+
+        let response = self
+            .client
+            .get(&info_refs_url)
+            .header("Accept", "application/x-git-receive-pack-advertisement")
+            .header("User-Agent", "git-med/0.1.0")
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let msg = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".into());
+            return Err(RemoteError::HttpStatus {
+                status: status.as_u16(),
+                message: msg,
+            });
+        }
+
+        let bytes = response.bytes().await?;
+        let packets = pkt_line::decode_pkt_lines(&bytes)
+            .map_err(|e| RemoteError::PktLine(e.to_string()))?;
+
+        match parse_initial_advertisement(&packets)? {
+            DiscoveryHeader::Version1(adv) => Ok(adv),
+            DiscoveryHeader::Version2(caps) => {
+                Ok(RefAdvertisement {
+                    protocol_version: 2,
+                    service: "git-receive-pack".to_string(),
+                    capabilities: caps,
+                    default_branch: None,
+                    refs: Vec::new(),
+                })
+            }
+        }
+    }
+
+    /// Push a local branch to a remote repository via Git Smart HTTP (`POST /git-receive-pack`).
+    ///
+    /// 1. Resolves local commit hash for `branch_name` in `<repo_root>/.git-med/refs/heads/<branch_name>`.
+    /// 2. Performs reference discovery via `discover_push_refs`.
+    /// 3. Traverses commit and tree reachability to determine objects missing on the remote.
+    /// 4. Generates a Git Packfile v2 containing the missing objects (or omits it if up to date).
+    /// 5. Posts the push request (`<old_id> <new_id> <ref>\0report-status...`) to `$REPO_URL/git-receive-pack`.
+    /// 6. Parses the `report-status` response; returns an error if any ref update failed (e.g. non-fast-forward).
+    /// 7. Upon success, updates the local remote-tracking reference at `.git-med/refs/remotes/origin/<branch>`.
+    pub async fn push_branch(
+        &self,
+        repo_url: &str,
+        repo_root: &Path,
+        branch_name: &str,
+    ) -> Result<PushResult, RemoteError> {
+        let clean_branch = branch_name.trim();
+        if clean_branch.is_empty() {
+            return Err(RemoteError::Protocol("branch name cannot be empty".into()));
+        }
+        let short_branch = clean_branch.strip_prefix("refs/heads/").unwrap_or(clean_branch);
+        let full_ref_name = format!("refs/heads/{}", short_branch);
+
+        // 1. Resolve local branch commit hash
+        let local_commit = crate::core::branch::load_ref_in(repo_root, short_branch)
+            .map_err(|e| RemoteError::Protocol(format!("failed to load local branch {}: {}", short_branch, e)))?
+            .ok_or_else(|| RemoteError::Protocol(format!("branch '{}' not found locally under .git-med/refs/heads/", short_branch)))?;
+
+        // 2. Discover references on remote server
+        let push_adv = self.discover_push_refs(repo_url).await?;
+
+        // 3. Find existing remote commit hash for this ref (if present)
+        let remote_ref = push_adv.get_ref(&full_ref_name);
+        let old_hash = remote_ref.map(|r| r.hash);
+
+        // Collect all remote known commit hashes to bound our reachability traversal
+        let remote_known_hashes: Vec<crate::files::hash::Hash> =
+            push_adv.refs.iter().map(|r| r.hash).collect();
+
+        // 4. Collect objects to pack (C_new .. C_old)
+        let objects_to_pack =
+            traversal::collect_objects_to_pack(repo_root, &local_commit, &remote_known_hashes)?;
+
+        // 5. Generate packfile bytes (if objects need to be uploaded)
+        let packfile_bytes = if !objects_to_pack.is_empty() {
+            let objects_slices: Vec<(crate::files::types::ObjectType, &[u8])> = objects_to_pack
+                .iter()
+                .map(|(_, obj_type, body)| (*obj_type, body.as_slice()))
+                .collect();
+            packfile::create_packfile_bytes(&objects_slices)?
+        } else {
+            Vec::new()
+        };
+
+        // 6. Build push request body
+        let request_body = push::build_push_request(
+            old_hash.as_ref(),
+            &local_commit,
+            &full_ref_name,
+            &packfile_bytes,
+        )?;
+
+        // 7. POST /git-receive-pack
+        let trimmed_url = repo_url.trim_end_matches('/');
+        let receive_pack_url = format!("{}/git-receive-pack", trimmed_url);
+
+        let response = self
+            .client
+            .post(&receive_pack_url)
+            .header("Content-Type", "application/x-git-receive-pack-request")
+            .header("Accept", "application/x-git-receive-pack-result")
+            .header("User-Agent", "git-med/0.1.0")
+            .body(request_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let msg = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".into());
+            return Err(RemoteError::HttpStatus {
+                status: status.as_u16(),
+                message: msg,
+            });
+        }
+
+        let response_bytes = response.bytes().await?;
+        let ref_updates = push::parse_push_response(&response_bytes)?;
+
+        // Check if the ref update was rejected (e.g. non-fast-forward)
+        if let Some(failed) = ref_updates.iter().find(|r| !r.success) {
+            return Err(RemoteError::Protocol(format!(
+                "push to ref '{}' rejected by server: {}",
+                failed.ref_name,
+                failed.error.as_deref().unwrap_or("unknown error")
+            )));
+        }
+
+        // 8. Update local remote-tracking branch under .git-med/refs/remotes/origin/<branch>
+        let remote_tracking_dir = repo_root.join(".git-med/refs/remotes/origin");
+        std::fs::create_dir_all(&remote_tracking_dir)?;
+        let remote_tracking_path = remote_tracking_dir.join(short_branch);
+        if let Some(parent) = remote_tracking_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&remote_tracking_path, format!("{}\n", local_commit.to_hex()))?;
+
+        Ok(PushResult {
+            branch: short_branch.to_string(),
+            old_hash,
+            new_hash: local_commit,
+            objects_pushed: objects_to_pack.len(),
+            ref_updates,
+        })
     }
 }

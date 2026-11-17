@@ -90,6 +90,29 @@ pub struct FetchResult {
     pub head_hash: Option<Hash>,
 }
 
+/// Status of an individual reference update in a push operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushRefUpdateResult {
+    pub ref_name: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Result of a remote push operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushResult {
+    /// Pushed branch name (e.g. "main" or "refs/heads/main").
+    pub branch: String,
+    /// Previous commit hash on remote if the branch already existed.
+    pub old_hash: Option<Hash>,
+    /// New commit hash pushed to the remote.
+    pub new_hash: Hash,
+    /// Total number of objects packaged and pushed to the remote.
+    pub objects_pushed: usize,
+    /// Status reported for each reference update.
+    pub ref_updates: Vec<PushRefUpdateResult>,
+}
+
 /// Errors originating from remote Git HTTP transport or protocol negotiation.
 #[derive(Debug)]
 pub enum RemoteError {

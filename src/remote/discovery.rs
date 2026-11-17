@@ -24,9 +24,12 @@ pub fn parse_initial_advertisement(packets: &[PktLine]) -> Result<DiscoveryHeade
         return parse_v2_capabilities(&packets[1..]).map(DiscoveryHeader::Version2);
     }
 
-    // Check for Protocol v1 service announcement: "# service=git-upload-pack"
+    // Check for Protocol v1 service announcement: "# service=git-upload-pack" or "# service=git-receive-pack"
     if first_line.starts_with("# service=git-upload-pack") {
-        return parse_v1_advertisement(packets).map(DiscoveryHeader::Version1);
+        return parse_v1_advertisement(packets, "git-upload-pack").map(DiscoveryHeader::Version1);
+    }
+    if first_line.starts_with("# service=git-receive-pack") {
+        return parse_v1_advertisement(packets, "git-receive-pack").map(DiscoveryHeader::Version1);
     }
 
     Err(RemoteError::Protocol(format!(
@@ -130,7 +133,10 @@ pub fn parse_v2_ls_refs_response(
 }
 
 /// Parse Protocol v1 reference advertisement stream.
-fn parse_v1_advertisement(packets: &[PktLine]) -> Result<RefAdvertisement, RemoteError> {
+fn parse_v1_advertisement(
+    packets: &[PktLine],
+    service_name: &str,
+) -> Result<RefAdvertisement, RemoteError> {
     // Protocol v1 layout:
     // Packet 0: # service=git-upload-pack\n
     // Packet 1: Flush (0000)
@@ -226,7 +232,7 @@ fn parse_v1_advertisement(packets: &[PktLine]) -> Result<RefAdvertisement, Remot
 
     Ok(RefAdvertisement {
         protocol_version: 1,
-        service: "git-upload-pack".to_string(),
+        service: service_name.to_string(),
         capabilities,
         default_branch,
         refs,
