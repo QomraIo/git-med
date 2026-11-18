@@ -106,10 +106,23 @@ pub fn branch_in(repo_root: &Path, branch_name: &str) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create ref dir {}: {}", parent.display(), e))?;
         }
-        if let Some(ref prior_hex) = prior_commit_opt {
-            fs::write(&target_ref_path, format!("{}\n", prior_hex))
+        // Check if a remote tracking branch exists under refs/remotes/origin/
+        let remote_tracking_path = git_med_dir.join("refs/remotes/origin").join(rel_ref);
+        let remote_hex = if remote_tracking_path.is_file() {
+            fs::read_to_string(&remote_tracking_path).ok()
+        } else {
+            None
+        };
+        let hex_to_use = remote_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or(prior_commit_opt.as_deref());
+
+        if let Some(hex) = hex_to_use {
+            fs::write(&target_ref_path, format!("{}\n", hex))
                 .map_err(|e| format!("failed to write ref {}: {}", target_ref_path.display(), e))?;
-            Some(Hash::from_hex(prior_hex.as_str()).map_err(|e| format!("invalid commit hash: {}", e))?)
+            Some(Hash::from_hex(hex).map_err(|e| format!("invalid commit hash: {}", e))?)
         } else {
             // No prior commits exist (unborn repository)
             File::create(&target_ref_path)
