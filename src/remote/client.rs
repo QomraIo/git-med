@@ -200,10 +200,35 @@ impl GitHttpClient {
             }
         }
 
+        let default_branch_clean = advertisement
+            .default_branch
+            .as_deref()
+            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+
+        let default_branch_name = default_branch_clean
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        // Always write .git-med/HEAD pointing to local default branch
+        let head_file = repo_root.join(".git-med/HEAD");
+        std::fs::write(
+            &head_file,
+            format!("ref: refs/heads/{}\n", default_branch_name),
+        )?;
+
         if wants.is_empty() {
+            let local_branch_path = repo_root
+                .join(".git-med/refs/heads")
+                .join(&default_branch_name);
+            if let Some(parent) = local_branch_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !local_branch_path.exists() {
+                std::fs::File::create(&local_branch_path)?;
+            }
             return Ok(FetchResult {
                 objects_unpacked: 0,
-                default_branch: advertisement.default_branch.clone(),
+                default_branch: Some(default_branch_name),
                 head_hash: None,
             });
         }
@@ -212,11 +237,7 @@ impl GitHttpClient {
             .fetch_packfile_and_unpack_internal(repo_url, repo_root, advertisement, &wants)
             .await?;
 
-        // 6. Materialize branch references and HEAD on disk
-        let default_branch_clean = advertisement
-            .default_branch
-            .as_deref()
-            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        // 6. Materialize branch references on disk
 
         let head_hash = advertisement.head_hash().or_else(|| {
             if let Some(ref branch) = default_branch_clean {
@@ -288,6 +309,16 @@ impl GitHttpClient {
         let config_path = git_med.join("config");
         let config_content = crate::core::remote::format_remote_ini_section("origin", repo_url);
         std::fs::write(&config_path, config_content)?;
+
+        // Ensure default HEAD and default branch ref exist as baseline
+        let head_file = git_med.join("HEAD");
+        if !head_file.exists() {
+            std::fs::write(&head_file, "ref: refs/heads/main\n")?;
+        }
+        let default_branch_ref = git_med.join("refs/heads/main");
+        if !default_branch_ref.exists() {
+            std::fs::File::create(&default_branch_ref)?;
+        }
 
         let advertisement = self.discover_refs(repo_url).await?;
         let result = self.fetch_and_unpack(repo_url, target_dir, &advertisement).await?;
