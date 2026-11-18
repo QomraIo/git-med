@@ -71,6 +71,39 @@ impl GitMedCli {
         self.run_cmd(&["branch", branch_name])
     }
 
+    /// git-med clone <url> [target_dir]
+    pub fn clone_cmd(&self, url: &str, target_dir: Option<&str>) -> Result<Output, String> {
+        if let Some(dir) = target_dir {
+            self.run_cmd(&["clone", url, dir])
+        } else {
+            self.run_cmd(&["clone", url])
+        }
+    }
+
+    /// git-med push [remote] [branch]
+    pub fn push_cmd(&self, remote: Option<&str>, branch: Option<&str>) -> Result<Output, String> {
+        let mut args = vec!["push"];
+        if let Some(r) = remote {
+            args.push(r);
+        }
+        if let Some(b) = branch {
+            args.push(b);
+        }
+        self.run_cmd(&args)
+    }
+
+    /// git-med pull [remote] [branch]
+    pub fn pull_cmd(&self, remote: Option<&str>, branch: Option<&str>) -> Result<Output, String> {
+        let mut args = vec!["pull"];
+        if let Some(r) = remote {
+            args.push(r);
+        }
+        if let Some(b) = branch {
+            args.push(b);
+        }
+        self.run_cmd(&args)
+    }
+
     /// git-med view [target_view]
     pub fn view(&self, target_view: Option<&str>) -> Result<String, String> {
         let output = match target_view {

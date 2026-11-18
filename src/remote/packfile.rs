@@ -106,37 +106,37 @@ pub fn unpack_packfile_into(pack_bytes: &[u8], repo_root: &Path) -> Result<usize
 
         // 5. Decompress object payload via flate2
         let mut decompress = Decompress::new(true);
-        let mut decompressed = Vec::with_capacity(size);
-        let mut chunk_buf = [0u8; 64 * 1024];
+        let mut decompressed = vec![0u8; size];
+        let mut total_out = 0;
+        let mut total_in = 0;
 
-        loop {
-            let before_in = decompress.total_in() as usize;
+        while total_out < size {
+            let in_slice = &pack_bytes[offset + total_in..];
+            let out_slice = &mut decompressed[total_out..];
+
+            let before_in = decompress.total_in();
             let before_out = decompress.total_out();
 
-            if offset + before_in > pack_bytes.len() {
-                return Err(RemoteError::Protocol(
-                    "unexpected end of packfile data during zlib decompression".into(),
-                ));
-            }
-
             let status = decompress.decompress(
-                &pack_bytes[offset + before_in..],
-                &mut chunk_buf,
-                FlushDecompress::Finish,
+                in_slice,
+                out_slice,
+                FlushDecompress::None,
             )?;
 
-            let written = (decompress.total_out() - before_out) as usize;
-            decompressed.extend_from_slice(&chunk_buf[..written]);
+            let consumed_in = (decompress.total_in() - before_in) as usize;
+            let produced_out = (decompress.total_out() - before_out) as usize;
 
-            match status {
-                Status::StreamEnd => break,
-                Status::Ok | Status::BufError => {
-                    if decompress.total_in() as usize == before_in && written == 0 {
-                        return Err(RemoteError::Protocol(
-                            "stalled decompression in packfile object stream".into(),
-                        ));
-                    }
-                }
+            total_in += consumed_in;
+            total_out += produced_out;
+
+            if status == Status::StreamEnd {
+                break;
+            }
+
+            if consumed_in == 0 && produced_out == 0 {
+                return Err(RemoteError::Protocol(
+                    "stalled decompression in packfile object stream".into(),
+                ));
             }
         }
 
@@ -214,4 +214,55 @@ pub fn create_packfile_bytes(objects: &[(ObjectType, &[u8])]) -> Result<Vec<u8>,
     buf.extend_from_slice(checksum.as_bytes());
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::init::init_at;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "git_med_packfile_test_{}_{}",
+                name,
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create repo dir");
+            init_at(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_single_object_packfile_roundtrip() {
+        let repo = TempRepo::new("single");
+        let obj = (ObjectType::Blob, b"hello world".as_slice());
+        let pack = create_packfile_bytes(&[obj]).unwrap();
+        let count = unpack_packfile_into(&pack, &repo.path).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_multiple_objects_packfile_roundtrip() {
+        let repo = TempRepo::new("multiple");
+        let obj1 = (ObjectType::Blob, b"hello world".as_slice());
+        let obj2 = (ObjectType::Blob, b"second object data here".as_slice());
+        let pack = create_packfile_bytes(&[obj1, obj2]).unwrap();
+        let count = unpack_packfile_into(&pack, &repo.path).unwrap();
+        assert_eq!(count, 2);
+    }
 }

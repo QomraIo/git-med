@@ -6,8 +6,11 @@ mod views;
 
 use core::add::add;
 use core::branch::branch;
+use core::clone::clone;
 use core::commit::commit;
 use core::init::init;
+use core::pull::pull;
+use core::push::push;
 use core::remote::remote;
 use core::view::view;
 use std::env;
@@ -30,6 +33,9 @@ fn main() {
         "branch" => branch(&args),
         "remote" => remote(&args),
         "view" => view(&args),
+        "clone" => clone(&args),
+        "push" => push(&args),
+        "pull" => pull(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }

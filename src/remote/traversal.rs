@@ -257,3 +257,171 @@ fn traverse_tree(
 
     Ok(())
 }
+
+/// Check if `ancestor` is an ancestor of `descendant` in the repository commit DAG.
+/// Returns `Ok(true)` if `ancestor == descendant` or reachable via parent links.
+pub fn is_ancestor(
+    repo_root: &Path,
+    ancestor: &Hash,
+    descendant: &Hash,
+) -> Result<bool, RemoteError> {
+    if ancestor == descendant {
+        return Ok(true);
+    }
+
+    let mut visited: HashSet<Hash> = HashSet::new();
+    let mut queue: VecDeque<Hash> = VecDeque::new();
+    queue.push_back(*descendant);
+
+    while let Some(current) = queue.pop_front() {
+        if current == *ancestor {
+            return Ok(true);
+        }
+
+        if !visited.insert(current) {
+            continue;
+        }
+
+        let (obj_type, body) = match read_object_bytes_in(repo_root, &current) {
+            Ok(res) => res,
+            Err(e) => {
+                return Err(RemoteError::Protocol(format!(
+                    "failed to read commit object {}: {}",
+                    current.to_hex(),
+                    e
+                )));
+            }
+        };
+
+        if obj_type != ObjectType::Commit {
+            return Err(RemoteError::Protocol(format!(
+                "object {} is not a commit (got {:?})",
+                current.to_hex(),
+                obj_type
+            )));
+        }
+
+        let body_str = std::str::from_utf8(&body).map_err(|e| {
+            RemoteError::Protocol(format!(
+                "invalid utf-8 in commit body {}: {}",
+                current.to_hex(),
+                e
+            ))
+        })?;
+
+        let mut lines = body_str.lines();
+        let _tree_line = lines.next();
+
+        if let Some(parent_line) = lines.next() {
+            let parent_trimmed = parent_line.trim();
+            if !parent_trimmed.is_empty() {
+                let parent_hash = Hash::from_hex(parent_trimmed).map_err(|e| {
+                    RemoteError::InvalidHash(format!(
+                        "invalid parent hash '{}' in commit {}: {}",
+                        parent_trimmed,
+                        current.to_hex(),
+                        e
+                    ))
+                })?;
+
+                if parent_hash == *ancestor {
+                    return Ok(true);
+                }
+
+                if !visited.contains(&parent_hash) {
+                    queue.push_back(parent_hash);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::init::init_at;
+    use crate::files::utils::make_object_from_bytes_in;
+    use crate::core::commit::format_commit_body;
+    use crate::files::hash::hash_raw;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "git_med_traversal_test_{}_{}_{}",
+                name,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create repo dir");
+            init_at(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_test_commit(repo_root: &Path, tree_hash: &Hash, parent: Option<&Hash>, msg: &str) -> Hash {
+        let parent_str = parent.map(|p| p.to_hex());
+        let body = format_commit_body(tree_hash, parent_str.as_deref(), msg);
+        let commit_hash = crate::files::utils::hash_bytes(&body, ObjectType::Commit);
+        make_object_from_bytes_in(&body, commit_hash, ObjectType::Commit, repo_root)
+            .expect("write commit object");
+        commit_hash
+    }
+
+    #[test]
+    fn test_is_ancestor_linear_history() {
+        let repo = TempRepo::new("is_ancestor_linear");
+        let dummy_tree = hash_raw(b"tree1");
+
+        // C1 (root) -> C2 -> C3
+        let c1 = write_test_commit(&repo.path, &dummy_tree, None, "commit 1");
+        let c2 = write_test_commit(&repo.path, &dummy_tree, Some(&c1), "commit 2");
+        let c3 = write_test_commit(&repo.path, &dummy_tree, Some(&c2), "commit 3");
+
+        assert!(is_ancestor(&repo.path, &c1, &c1).unwrap());
+        assert!(is_ancestor(&repo.path, &c1, &c2).unwrap());
+        assert!(is_ancestor(&repo.path, &c1, &c3).unwrap());
+        assert!(is_ancestor(&repo.path, &c2, &c3).unwrap());
+
+        // Descendant cannot be ancestor of parent
+        assert!(!is_ancestor(&repo.path, &c2, &c1).unwrap());
+        assert!(!is_ancestor(&repo.path, &c3, &c1).unwrap());
+        assert!(!is_ancestor(&repo.path, &c3, &c2).unwrap());
+    }
+
+    #[test]
+    fn test_is_ancestor_diverged_history() {
+        let repo = TempRepo::new("is_ancestor_diverged");
+        let dummy_tree = hash_raw(b"tree2");
+
+        // C1 (root) -> C2a
+        //           -> C2b
+        let c1 = write_test_commit(&repo.path, &dummy_tree, None, "commit 1");
+        let c2a = write_test_commit(&repo.path, &dummy_tree, Some(&c1), "commit 2a");
+        let c2b = write_test_commit(&repo.path, &dummy_tree, Some(&c1), "commit 2b");
+
+        assert!(is_ancestor(&repo.path, &c1, &c2a).unwrap());
+        assert!(is_ancestor(&repo.path, &c1, &c2b).unwrap());
+
+        // Diverged branches are not ancestors of each other
+        assert!(!is_ancestor(&repo.path, &c2a, &c2b).unwrap());
+        assert!(!is_ancestor(&repo.path, &c2b, &c2a).unwrap());
+    }
+}

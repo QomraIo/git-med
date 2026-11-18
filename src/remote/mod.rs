@@ -14,8 +14,8 @@ pub use packfile::{create_packfile_bytes, unpack_packfile_into};
 pub use pkt_line::{PktLine, decode_pkt_lines, read_pkt_line, write_pkt_line};
 pub use push::{build_push_request, parse_push_response};
 pub use sideband::{extract_packfile_bytes, extract_packfile_stream};
-pub use traversal::collect_objects_to_pack;
+pub use traversal::{collect_objects_to_pack, is_ancestor};
 pub use types::{
-    FetchResult, PushRefUpdateResult, PushResult, RefAdvertisement, RemoteError, RemoteRef,
+    FetchResult, PullResult, PushRefUpdateResult, PushResult, RefAdvertisement, RemoteError, RemoteRef,
     ServerCapabilities,
 };

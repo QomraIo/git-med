@@ -113,6 +113,21 @@ pub struct PushResult {
     pub ref_updates: Vec<PushRefUpdateResult>,
 }
 
+/// Result of a remote pull operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullResult {
+    /// Pulled branch name (e.g. "main" or "feature").
+    pub branch: String,
+    /// Previous commit hash on local branch if present.
+    pub old_hash: Option<Hash>,
+    /// New commit hash after pull.
+    pub new_hash: Hash,
+    /// Total number of objects unpacked into `.git-med/objects/`.
+    pub objects_unpacked: usize,
+    /// Whether the branch was already at the remote commit.
+    pub already_up_to_date: bool,
+}
+
 /// Errors originating from remote Git HTTP transport or protocol negotiation.
 #[derive(Debug)]
 pub enum RemoteError {

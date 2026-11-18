@@ -558,4 +558,123 @@ mod tests {
     fn test_e2e_dicom_brats_qomra_dicom() {
         run_e2e_workflow("dicom", "brats", "qomra");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_e2e_cli_clone_and_pull() {
+        use crate::files::types::ObjectType;
+        use crate::remote::packfile::create_packfile_bytes;
+        use crate::remote::pkt_line::{self, encode_str};
+        use crate::remote::traversal::collect_objects_to_pack;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let src_repo = TempE2ERepo::new("cli_src");
+        crate::core::init::init_at(&src_repo.path);
+        let cli_src = GitMedCli::new(&src_repo.path);
+
+        // Generate data in src
+        crate::tester::generate::sample::qomra(&src_repo.path, &["data"], 1, 1, 1, 1);
+        cli_src.add().expect("add");
+        cli_src.commit("commit 1").expect("commit");
+
+        let head_hash_str = cli_src.read_branch_ref("main").expect("read main ref");
+        let head_hash = crate::files::hash::Hash::from_hex(&head_hash_str).expect("parse hash");
+
+        let objects = collect_objects_to_pack(&src_repo.path, &head_hash, &[]).expect("collect");
+        let obj_slices: Vec<(ObjectType, &[u8])> = objects.iter().map(|(_, t, b)| (*t, b.as_slice())).collect();
+        let pack_bytes = create_packfile_bytes(&obj_slices).expect("pack bytes");
+
+        // Spawn mock git HTTP server
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_res = listener.accept() => {
+                        let Ok((mut socket, _)) = accept_res else { break; };
+                        let head_hash = head_hash;
+                        let pack_bytes = pack_bytes.clone();
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 8192];
+                            let n = match socket.read(&mut buf).await {
+                                Ok(n) if n > 0 => n,
+                                _ => return,
+                            };
+                            let req = String::from_utf8_lossy(&buf[..n]);
+
+                            if req.contains("GET /info/refs?service=git-upload-pack") {
+                                let mut adv = Vec::new();
+                                adv.extend_from_slice(&encode_str("version 2\n").unwrap());
+                                adv.extend_from_slice(&encode_str("ls-refs\n").unwrap());
+                                adv.extend_from_slice(&encode_str("fetch=shallow\n").unwrap());
+                                adv.extend_from_slice(pkt_line::encode_flush());
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    adv.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&adv).await;
+                            } else if req.contains("POST /git-upload-pack") {
+                                if req.contains("command=ls-refs") {
+                                    let mut ls = Vec::new();
+                                    let l1 = format!("{} HEAD symref-target:refs/heads/main\n", head_hash.to_hex());
+                                    let l2 = format!("{} refs/heads/main\n", head_hash.to_hex());
+                                    ls.extend_from_slice(&encode_str(&l1).unwrap());
+                                    ls.extend_from_slice(&encode_str(&l2).unwrap());
+                                    ls.extend_from_slice(pkt_line::encode_flush());
+
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        ls.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&ls).await;
+                                } else if req.contains("command=fetch") {
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        pack_bytes.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&pack_bytes).await;
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+
+        // Test git-med clone <url> <dest>
+        let dest_parent = TempE2ERepo::new("cli_dest_parent");
+        let dest_path = dest_parent.path.join("cloned_repo");
+        let cli_parent = GitMedCli::new(&dest_parent.path);
+        cli_parent
+            .clone_cmd(&server_url, Some(&dest_path.display().to_string()))
+            .expect("cli clone");
+
+        let cli_cloned = GitMedCli::new(&dest_path);
+
+        // Verify config
+        let config_path = dest_path.join(".git-med/config");
+        assert!(config_path.is_file());
+        let config_content = fs::read_to_string(&config_path).unwrap();
+        assert!(config_content.contains("[remote \"origin\"]"));
+        assert!(config_content.contains(&server_url));
+
+        // Verify files materialized
+        let dcm_file = dest_path.join("data/clinic/subject_001/study_001/series_001/instance_001.dcm");
+        assert!(dcm_file.is_file());
+
+        // Verify index populated
+        assert!(cli_cloned.index_file_size() > 0);
+
+        // Test git-med pull (already up to date)
+        let pull_out = cli_cloned.pull_cmd(None, None).expect("cli pull");
+        let stdout = String::from_utf8_lossy(&pull_out.stdout);
+        assert!(stdout.contains("Already up to date."));
+    }
 }
