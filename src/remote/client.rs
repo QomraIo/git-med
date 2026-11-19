@@ -305,6 +305,11 @@ impl GitHttpClient {
             std::fs::write(&view_file, "QOMRA\n")?;
         }
 
+        let lfs_track_file = git_med.join("lfs_track");
+        if !lfs_track_file.exists() {
+            let _ = std::fs::write(&lfs_track_file, crate::files::lfs::DEFAULT_LFS_PATTERNS);
+        }
+
         // Populate .git-med/config with [remote "origin"]
         let config_path = git_med.join("config");
         let config_content = crate::core::remote::format_remote_ini_section("origin", repo_url);
@@ -329,6 +334,9 @@ impl GitHttpClient {
                 .map_err(|e| RemoteError::Protocol(format!("failed to load tree from commit {}: {}", head_hash.to_hex(), e)))?;
             tree.save(&git_med.join("index"))
                 .map_err(|e| RemoteError::Protocol(format!("failed to save index: {}", e)))?;
+
+            // Download any missing LFS objects before materializing
+            self.download_lfs_objects_for_tree(repo_url, target_dir, &tree.root).await?;
 
             let view_name = crate::core::view::read_view_name(&git_med.join("VIEW"))
                 .unwrap_or_else(|_| "qomra".to_string());
@@ -448,6 +456,9 @@ impl GitHttpClient {
         tree.save(&git_med.join("index"))
             .map_err(|e| RemoteError::Protocol(format!("failed to save index: {}", e)))?;
 
+        // Download any missing LFS objects before materializing
+        self.download_lfs_objects_for_tree(repo_url, repo_root, &tree.root).await?;
+
         let view_name = crate::core::view::read_view_name(&git_med.join("VIEW"))
             .unwrap_or_else(|_| "qomra".to_string());
         let view = crate::views::get_view_in(&view_name, repo_root)
@@ -549,6 +560,9 @@ impl GitHttpClient {
         let objects_to_pack =
             traversal::collect_objects_to_pack(repo_root, &local_commit, &remote_known_hashes)?;
 
+        // Upload any LFS objects to S3 before pushing packfile
+        self.upload_lfs_objects(repo_url, repo_root, &objects_to_pack).await?;
+
         // 5. Generate packfile bytes (if objects need to be uploaded)
         let packfile_bytes = if !objects_to_pack.is_empty() {
             let objects_slices: Vec<(crate::files::types::ObjectType, &[u8])> = objects_to_pack
@@ -623,6 +637,224 @@ impl GitHttpClient {
             ref_updates,
         })
     }
+
+    /// Upload all raw LFS objects to S3 via presigned PUT URLs requested from the remote server.
+    pub async fn upload_lfs_objects(
+        &self,
+        repo_url: &str,
+        repo_root: &Path,
+        objects_to_pack: &[(crate::files::hash::Hash, crate::files::types::ObjectType, Vec<u8>)],
+    ) -> Result<(), RemoteError> {
+        let mut lfs_uploads = Vec::new();
+        let mut raw_paths = Vec::new();
+
+        for (_, obj_type, body) in objects_to_pack {
+            if *obj_type == crate::files::types::ObjectType::Lfs {
+                let pointer = crate::files::lfs::LfsPointer::parse(body)
+                    .map_err(|e| RemoteError::Protocol(format!("invalid LFS pointer object: {}", e)))?;
+                let raw_path = crate::files::lfs::lfs_raw_object_path(repo_root, &pointer.hash);
+                if !raw_path.is_file() {
+                    return Err(RemoteError::Protocol(format!(
+                        "missing raw LFS file on disk at {} for hash {}",
+                        raw_path.display(),
+                        pointer.hash.to_hex()
+                    )));
+                }
+                let meta = std::fs::metadata(&raw_path)?;
+                lfs_uploads.push(crate::remote::types::LfsUploadObjectReq {
+                    hash: pointer.hash.to_hex(),
+                    remote_path: pointer.remote_path,
+                    size: meta.len(),
+                });
+                raw_paths.push((pointer.hash.to_hex(), raw_path));
+            }
+        }
+
+        if lfs_uploads.is_empty() {
+            return Ok(());
+        }
+
+        let trimmed_url = repo_url.trim_end_matches('/');
+        let upload_urls_endpoint = format!("{}/lfs/upload-urls", trimmed_url);
+
+        let req_payload = crate::remote::types::LfsUploadUrlsReq {
+            objects: lfs_uploads,
+        };
+        let body_bytes = serde_json::to_vec(&req_payload)
+            .map_err(|e| RemoteError::Protocol(format!("failed to serialize JSON: {}", e)))?;
+
+        let resp = self
+            .client
+            .post(&upload_urls_endpoint)
+            .header("Content-Type", "application/json")
+            .body(body_bytes)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.as_u16() == 501 || status.as_u16() == 503 {
+            return Err(RemoteError::Protocol(
+                "S3 storage is disabled on remote server".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
+            return Err(RemoteError::HttpStatus {
+                status: status.as_u16(),
+                message: format!("LFS upload-urls failed: {}", err_text),
+            });
+        }
+
+        let resp_bytes = resp.bytes().await?;
+        let resp_body: crate::remote::types::LfsUrlsResp = serde_json::from_slice(&resp_bytes)
+            .map_err(|e| RemoteError::Protocol(format!("failed to parse JSON response: {}", e)))?;
+
+        for (hex, path) in raw_paths {
+            let put_url = resp_body.urls.get(&hex).ok_or_else(|| {
+                RemoteError::Protocol(format!("server did not return upload url for {}", hex))
+            })?;
+
+            let bytes = std::fs::read(&path)?;
+            let put_resp = self.client.put(put_url).body(bytes).send().await?;
+            if !put_resp.status().is_success() {
+                let err_msg = put_resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".into());
+                return Err(RemoteError::Protocol(format!(
+                    "failed to upload LFS object {} to S3: {}",
+                    hex, err_msg
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Download all missing raw LFS objects referenced in a commit tree from S3.
+    pub async fn download_lfs_objects_for_tree(
+        &self,
+        repo_url: &str,
+        repo_root: &Path,
+        root: &crate::core::tree::NodeRef,
+    ) -> Result<(), RemoteError> {
+        let raw_hashes = collect_lfs_hashes_from_tree(repo_root, root)?;
+        let mut missing_hashes = Vec::new();
+
+        for h in raw_hashes {
+            if !crate::files::lfs::has_lfs_raw(repo_root, &h) {
+                missing_hashes.push(h.to_hex());
+            }
+        }
+
+        if missing_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let trimmed_url = repo_url.trim_end_matches('/');
+        let download_urls_endpoint = format!("{}/lfs/download-urls", trimmed_url);
+
+        let req_payload = crate::remote::types::LfsDownloadUrlsReq {
+            hashes: missing_hashes.clone(),
+        };
+        let body_bytes = serde_json::to_vec(&req_payload)
+            .map_err(|e| RemoteError::Protocol(format!("failed to serialize JSON: {}", e)))?;
+
+        let resp = self
+            .client
+            .post(&download_urls_endpoint)
+            .header("Content-Type", "application/json")
+            .body(body_bytes)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.as_u16() == 501 || status.as_u16() == 503 {
+            return Err(RemoteError::Protocol(
+                "S3 storage is disabled on remote server".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
+            return Err(RemoteError::HttpStatus {
+                status: status.as_u16(),
+                message: format!("LFS download-urls failed: {}", err_text),
+            });
+        }
+
+        let resp_bytes = resp.bytes().await?;
+        let resp_body: crate::remote::types::LfsUrlsResp = serde_json::from_slice(&resp_bytes)
+            .map_err(|e| RemoteError::Protocol(format!("failed to parse JSON response: {}", e)))?;
+
+        for hex in missing_hashes {
+            let get_url = resp_body.urls.get(&hex).ok_or_else(|| {
+                RemoteError::Protocol(format!("server did not return download url for {}", hex))
+            })?;
+
+            let get_resp = self.client.get(get_url).send().await?;
+            if !get_resp.status().is_success() {
+                return Err(RemoteError::Protocol(format!(
+                    "failed to download LFS object {} from S3: status {}",
+                    hex,
+                    get_resp.status()
+                )));
+            }
+
+            let bytes = get_resp.bytes().await?;
+            let downloaded_hash = crate::files::hash::hash_raw(&bytes);
+            if downloaded_hash.to_hex() != hex {
+                return Err(RemoteError::Protocol(format!(
+                    "corrupted LFS download for {}: hash mismatch (got {})",
+                    hex,
+                    downloaded_hash.to_hex()
+                )));
+            }
+
+            crate::files::lfs::stage_lfs_bytes(repo_root, &bytes, &downloaded_hash)
+                .map_err(|e| RemoteError::Protocol(format!("failed to stage downloaded LFS file: {}", e)))?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Helper to recursively traverse a tree root and collect all referenced raw LFS hashes.
+fn collect_lfs_hashes_from_tree(
+    repo_root: &Path,
+    root: &crate::core::tree::NodeRef,
+) -> Result<Vec<crate::files::hash::Hash>, RemoteError> {
+    let mut fringe = std::collections::VecDeque::new();
+    fringe.push_back(std::rc::Rc::clone(root));
+    let mut lfs_raw_hashes = Vec::new();
+
+    while let Some(curr) = fringe.pop_front() {
+        let node = curr.borrow();
+
+        if let Some(ref h) = node.self_hash {
+            if let Ok((obj_type, body)) = crate::files::utils::read_object_bytes_in(repo_root, h) {
+                if obj_type == crate::files::types::ObjectType::Lfs {
+                    if let Ok(pointer) = crate::files::lfs::LfsPointer::parse(&body) {
+                        lfs_raw_hashes.push(pointer.hash);
+                    }
+                }
+            }
+        }
+
+        match &node.children {
+            crate::core::tree::Children::Attributes(map) | crate::core::tree::Children::Files(map) => {
+                for child in map.values() {
+                    fringe.push_back(std::rc::Rc::clone(child));
+                }
+            }
+            crate::core::tree::Children::None => {}
+        }
+
+        for meta_node in node.meta.values() {
+            fringe.push_back(std::rc::Rc::clone(meta_node));
+        }
+    }
+
+    Ok(lfs_raw_hashes)
 }
 
 #[cfg(test)]
@@ -678,6 +910,7 @@ mod tests {
     async fn start_mock_git_server(
         head_hash: Hash,
         pack_bytes: Vec<u8>,
+        lfs_raw_dir: Option<std::path::PathBuf>,
     ) -> (String, tokio::sync::oneshot::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -694,9 +927,10 @@ mod tests {
                         let Ok((mut socket, _)) = accept_res else { break; };
                         let head_hash = head_hash;
                         let pack_bytes = pack_bytes.clone();
+                        let lfs_dir = lfs_raw_dir.clone();
 
                         tokio::spawn(async move {
-                            let mut buf = vec![0u8; 8192];
+                            let mut buf = vec![0u8; 16384];
                             let n = match socket.read(&mut buf).await {
                                 Ok(n) if n > 0 => n,
                                 _ => return,
@@ -739,6 +973,42 @@ mod tests {
                                     let _ = socket.write_all(resp.as_bytes()).await;
                                     let _ = socket.write_all(&pack_bytes).await;
                                 }
+                            } else if req.contains("POST /lfs/download-urls") {
+                                let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let body_bytes = &buf[body_start..n];
+                                if let Ok(req_json) = serde_json::from_slice::<crate::remote::types::LfsDownloadUrlsReq>(body_bytes) {
+                                    let base_url = format!("http://127.0.0.1:{}", port);
+                                    let mut urls = std::collections::HashMap::new();
+                                    for h in req_json.hashes {
+                                        urls.insert(h.clone(), format!("{}/s3-download/{}", base_url, h));
+                                    }
+                                    let resp_json = crate::remote::types::LfsUrlsResp { urls };
+                                    let resp_bytes = serde_json::to_vec(&resp_json).unwrap();
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        resp_bytes.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&resp_bytes).await;
+                                }
+                            } else if req.contains("GET /s3-download/") {
+                                let hex = req
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .and_then(|p| p.strip_prefix("/s3-download/"))
+                                    .unwrap_or("");
+                                let raw_bytes = if let Some(ref dir) = lfs_dir {
+                                    let p = dir.join(&hex[..2.min(hex.len())]).join(&hex[2.min(hex.len())..]);
+                                    fs::read(&p).unwrap_or_else(|_| crate::tester::generate::sample::DICOM_SAMPLE.to_vec())
+                                } else {
+                                    crate::tester::generate::sample::DICOM_SAMPLE.to_vec()
+                                };
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    raw_bytes.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&raw_bytes).await;
                             }
                         });
                     }
@@ -764,7 +1034,12 @@ mod tests {
         let pack_bytes = create_packfile_bytes(&obj_slices).expect("packfile bytes");
 
         // 3. Start mock server
-        let (server_url, _shutdown) = start_mock_git_server(commit_hash, pack_bytes).await;
+        let (server_url, _shutdown) = start_mock_git_server(
+            commit_hash,
+            pack_bytes,
+            Some(src.path.join(".git-med/lfs/objects")),
+        )
+        .await;
 
         // 4. Clone into destination repository
         let dest = TempDirRepo::new("dest_clone");
@@ -824,7 +1099,8 @@ mod tests {
         fs::write(dest.path.join(".git-med/refs/heads/main"), format!("{}\n", commit1.to_hex())).unwrap();
 
         // 2. Test already up to date
-        let (server_url1, _shutdown1) = start_mock_git_server(commit1, pack1).await;
+        let (server_url1, _shutdown1) =
+            start_mock_git_server(commit1, pack1, Some(src.path.join(".git-med/lfs/objects"))).await;
         let client = GitHttpClient::new();
         let pull_res1 = client.pull_branch(&server_url1, &dest.path, "main").await.expect("pull 1");
         assert!(pull_res1.already_up_to_date);
@@ -841,7 +1117,8 @@ mod tests {
         let pack2 = create_packfile_bytes(&obj_slices2).unwrap();
 
         // 4. Test fast-forward pull
-        let (server_url2, _shutdown2) = start_mock_git_server(commit2, pack2).await;
+        let (server_url2, _shutdown2) =
+            start_mock_git_server(commit2, pack2, Some(src.path.join(".git-med/lfs/objects"))).await;
         let pull_res2 = client.pull_branch(&server_url2, &dest.path, "main").await.expect("pull 2");
         assert!(!pull_res2.already_up_to_date);
         assert_eq!(pull_res2.old_hash, Some(commit1));
@@ -896,7 +1173,7 @@ mod tests {
         let slices_remote: Vec<(ObjectType, &[u8])> = objs_remote.iter().map(|(_, t, b)| (*t, b.as_slice())).collect();
         let pack_remote = create_packfile_bytes(&slices_remote).unwrap();
 
-        let (server_url, _shutdown) = start_mock_git_server(c_remote, pack_remote).await;
+        let (server_url, _shutdown) = start_mock_git_server(c_remote, pack_remote, None).await;
 
         let client = GitHttpClient::new();
         let err = client.pull_branch(&server_url, &dest.path, "main").await.unwrap_err();
@@ -959,6 +1236,27 @@ mod tests {
                                 );
                                 let _ = socket.write_all(resp.as_bytes()).await;
                                 let _ = socket.write_all(&adv).await;
+                            } else if req.contains("POST /lfs/upload-urls") {
+                                let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let body_bytes = &buf[body_start..n];
+                                if let Ok(req_json) = serde_json::from_slice::<crate::remote::types::LfsUploadUrlsReq>(body_bytes) {
+                                    let base_url = format!("http://127.0.0.1:{}", port);
+                                    let mut urls = std::collections::HashMap::new();
+                                    for obj in req_json.objects {
+                                        urls.insert(obj.hash.clone(), format!("{}/s3-upload/{}", base_url, obj.hash));
+                                    }
+                                    let resp_json = crate::remote::types::LfsUrlsResp { urls };
+                                    let resp_bytes = serde_json::to_vec(&resp_json).unwrap();
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        resp_bytes.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&resp_bytes).await;
+                                }
+                            } else if req.contains("PUT /s3-upload/") {
+                                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = socket.write_all(resp.as_bytes()).await;
                             } else if req.contains("POST /git-receive-pack") {
                                 // report-status response
                                 let mut report = Vec::new();
@@ -989,5 +1287,255 @@ mod tests {
         assert!(tracking_ref_path.is_file());
         let tracking_ref = fs::read_to_string(&tracking_ref_path).unwrap();
         assert_eq!(tracking_ref.trim(), commit_hash.to_hex());
+    }
+
+    #[tokio::test]
+    async fn test_push_branch_uploads_lfs_objects() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let repo = TempDirRepo::new("push_lfs");
+        init_at(&repo.path);
+
+        // Configure LFS tracking for *.dcm
+        fs::write(repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
+
+        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        add_in(&repo.path).expect("add_in with lfs");
+        let commit_hash = commit_with_message_in(&repo.path, "lfs commit").unwrap();
+
+        let uploaded_s3_payloads: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let uploaded_clone = Arc::clone(&uploaded_s3_payloads);
+
+        // Spawn mock server handling lfs upload-urls and S3 PUT
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_res = listener.accept() => {
+                        let Ok((mut socket, _)) = accept_res else { break; };
+                        let uploaded = Arc::clone(&uploaded_clone);
+                        let base_url = format!("http://127.0.0.1:{}", port);
+
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 16384];
+                            let n = match socket.read(&mut buf).await {
+                                Ok(n) if n > 0 => n,
+                                _ => return,
+                            };
+                            let req_head = String::from_utf8_lossy(&buf[..n]);
+
+                            if req_head.contains("GET /info/refs?service=git-receive-pack") {
+                                let mut adv = Vec::new();
+                                adv.extend_from_slice(&encode_str("# service=git-receive-pack\n").unwrap());
+                                adv.extend_from_slice(pkt_line::encode_flush());
+                                let line1 = "0000000000000000000000000000000000000000 capabilities^{}\0report-status delete-refs\n";
+                                adv.extend_from_slice(&encode_str(line1).unwrap());
+                                adv.extend_from_slice(pkt_line::encode_flush());
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-receive-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    adv.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&adv).await;
+                            } else if req_head.contains("POST /lfs/upload-urls") {
+                                // Extract body to parse requested hashes
+                                let body_start = req_head.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let body_bytes = &buf[body_start..n];
+                                let req_json: crate::remote::types::LfsUploadUrlsReq =
+                                    serde_json::from_slice(body_bytes).unwrap();
+
+                                let mut urls = std::collections::HashMap::new();
+                                for obj in req_json.objects {
+                                    urls.insert(obj.hash.clone(), format!("{}/s3-upload/{}", base_url, obj.hash));
+                                }
+                                let resp_json = crate::remote::types::LfsUrlsResp { urls };
+                                let resp_bytes = serde_json::to_vec(&resp_json).unwrap();
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    resp_bytes.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&resp_bytes).await;
+                            } else if req_head.contains("PUT /s3-upload/") {
+                                let body_start = req_head.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let payload = buf[body_start..n].to_vec();
+                                uploaded.lock().await.push(payload);
+
+                                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                            } else if req_head.contains("POST /git-receive-pack") {
+                                let mut report = Vec::new();
+                                report.extend_from_slice(&encode_str("unpack ok\n").unwrap());
+                                report.extend_from_slice(&encode_str("ok refs/heads/main\n").unwrap());
+                                report.extend_from_slice(pkt_line::encode_flush());
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-receive-pack-result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    report.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&report).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+
+        let client = GitHttpClient::new();
+        let push_res = client.push_branch(&server_url, &repo.path, "main").await.expect("push_branch");
+        assert_eq!(push_res.branch, "main");
+        assert_eq!(push_res.new_hash, commit_hash);
+
+        // Verify that the LFS object was uploaded via HTTP PUT
+        let payloads = uploaded_s3_payloads.lock().await;
+        assert_eq!(payloads.len(), 1, "expected 1 LFS file uploaded to S3");
+        assert!(!payloads[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clone_repo_downloads_lfs_objects() {
+        let origin_repo = TempDirRepo::new("clone_origin");
+        init_at(&origin_repo.path);
+        fs::write(origin_repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
+        qomra(&origin_repo.path, &["data"], 1, 1, 1, 1);
+        add_in(&origin_repo.path).expect("origin add");
+        let commit_hash = commit_with_message_in(&origin_repo.path, "origin commit").unwrap();
+
+        // Collect packfile objects from origin_repo
+        let objs = collect_objects_to_pack(&origin_repo.path, &commit_hash, &[]).unwrap();
+        let slices: Vec<(ObjectType, &[u8])> = objs.iter().map(|(_, t, b)| (*t, b.as_slice())).collect();
+        let pack_bytes = create_packfile_bytes(&slices).unwrap();
+
+        // Read the raw LFS file content from origin_repo
+        let lfs_raw_dir = origin_repo.path.join(".git-med/lfs/objects");
+        let raw_entries: Vec<_> = fs::read_dir(&lfs_raw_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .flat_map(|prefix_dir| fs::read_dir(prefix_dir.path()).unwrap().filter_map(|e| e.ok()))
+            .collect();
+        assert!(!raw_entries.is_empty(), "must have staged raw LFS objects");
+        let raw_lfs_bytes = fs::read(raw_entries[0].path()).unwrap();
+        let raw_lfs_hash = crate::files::hash::hash_raw(&raw_lfs_bytes);
+
+        // Spawn mock server providing upload-pack, lfs download-urls, and S3 GET
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let raw_bytes_for_server = raw_lfs_bytes.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_res = listener.accept() => {
+                        let Ok((mut socket, _)) = accept_res else { break; };
+                        let base_url = format!("http://127.0.0.1:{}", port);
+                        let pack = pack_bytes.clone();
+                        let raw_bytes = raw_bytes_for_server.clone();
+
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 16384];
+                            let n = match socket.read(&mut buf).await {
+                                Ok(n) if n > 0 => n,
+                                _ => return,
+                            };
+                            let req = String::from_utf8_lossy(&buf[..n]);
+
+                            if req.contains("GET /info/refs?service=git-upload-pack") {
+                                let mut adv_body = Vec::new();
+                                adv_body.extend_from_slice(&encode_str("version 2\n").unwrap());
+                                adv_body.extend_from_slice(&encode_str("ls-refs\n").unwrap());
+                                adv_body.extend_from_slice(&encode_str("fetch=shallow\n").unwrap());
+                                adv_body.extend_from_slice(pkt_line::encode_flush());
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    adv_body.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&adv_body).await;
+                            } else if req.contains("POST /git-upload-pack") {
+                                if req.contains("command=ls-refs") {
+                                    let mut ls_body = Vec::new();
+                                    let line1 = format!("{} HEAD symref-target:refs/heads/main\n", commit_hash.to_hex());
+                                    let line2 = format!("{} refs/heads/main\n", commit_hash.to_hex());
+                                    ls_body.extend_from_slice(&encode_str(&line1).unwrap());
+                                    ls_body.extend_from_slice(&encode_str(&line2).unwrap());
+                                    ls_body.extend_from_slice(pkt_line::encode_flush());
+
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        ls_body.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&ls_body).await;
+                                } else if req.contains("command=fetch") {
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        pack.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&pack).await;
+                                }
+                            } else if req.contains("POST /lfs/download-urls") {
+                                let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let body_bytes = &buf[body_start..n];
+                                let req_json: crate::remote::types::LfsDownloadUrlsReq =
+                                    serde_json::from_slice(body_bytes).unwrap();
+
+                                let mut urls = std::collections::HashMap::new();
+                                for h in req_json.hashes {
+                                    urls.insert(h.clone(), format!("{}/s3-download/{}", base_url, h));
+                                }
+                                let resp_json = crate::remote::types::LfsUrlsResp { urls };
+                                let resp_bytes = serde_json::to_vec(&resp_json).unwrap();
+
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    resp_bytes.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&resp_bytes).await;
+                            } else if req.contains("GET /s3-download/") {
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    raw_bytes.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&raw_bytes).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+
+        let target_repo = TempDirRepo::new("clone_dest");
+        let client = GitHttpClient::new();
+        client.clone_repo(&server_url, &target_repo.path).await.expect("clone_repo");
+
+        // Verify raw LFS object exists in cloned repo's .git-med/lfs/objects/
+        assert!(crate::files::lfs::has_lfs_raw(&target_repo.path, &raw_lfs_hash));
+
+        // Verify materialized instance file in working directory matches the raw bytes
+        let materialized_file = target_repo.path.join("data/clinic/subject_001/study_001/series_001/instance_001.dcm");
+        assert!(materialized_file.is_file(), "materialized instance file must exist");
+        let content = fs::read(&materialized_file).unwrap();
+        assert_eq!(content, raw_lfs_bytes, "materialized file content must match downloaded raw LFS bytes");
     }
 }

@@ -33,6 +33,32 @@ pub fn add_node_object_in(
     Ok(())
 }
 
+pub fn add_node_lfs_object_in(
+    repo_root: &Path,
+    rel_path: &Path,
+    node: &NodeRef,
+) -> Result<(), ()> {
+    let disk_path = repo_root.join(rel_path);
+    let raw_hash = crate::files::lfs::compute_raw_file_hash(&disk_path).map_err(|_| ())?;
+
+    // 1. Stage raw file in .git-med/lfs/objects/{xx}/{yy}
+    crate::files::lfs::stage_lfs_file(repo_root, &disk_path, &raw_hash).map_err(|_| ())?;
+
+    // 2. Create LFS pointer object in .git-med/objects/
+    let pointer_hash = crate::files::lfs::create_and_store_lfs_pointer(repo_root, &raw_hash)
+        .map_err(|_| ())?;
+
+    let mut node_mut = node.borrow_mut();
+    if node_mut.self_hash != Some(pointer_hash) {
+        node_mut.self_hash = Some(pointer_hash);
+        node_mut.invalidate_ancestors_hash();
+    }
+
+    node_mut.node_metadata = get_file_metadata(&disk_path);
+    node_mut.visited = true;
+    Ok(())
+}
+
 pub fn git_add_file(path: &Path, node: &NodeRef) -> Result<(), ()> {
     git_add_file_in(Path::new("."), path, node)
 }
@@ -42,7 +68,11 @@ pub fn git_add_metafile(path: &Path, node: &NodeRef) -> Result<(), ()> {
 }
 
 pub fn git_add_file_in(repo_root: &Path, rel_path: &Path, node: &NodeRef) -> Result<(), ()> {
-    add_node_object_in(repo_root, rel_path, node, ObjectType::Blob)
+    if crate::files::lfs::is_lfs_tracked(repo_root, rel_path) {
+        add_node_lfs_object_in(repo_root, rel_path, node)
+    } else {
+        add_node_object_in(repo_root, rel_path, node, ObjectType::Blob)
+    }
 }
 
 pub fn git_add_metafile_in(repo_root: &Path, rel_path: &Path, node: &NodeRef) -> Result<(), ()> {

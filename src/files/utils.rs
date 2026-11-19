@@ -143,6 +143,7 @@ pub fn read_object_bytes_in(
         "blob" => ObjectType::Blob,
         "commit" => ObjectType::Commit,
         "meta" => ObjectType::Meta,
+        "lfs" => ObjectType::Lfs,
         other => return Err(format!("unknown object type '{}' in {}", other, hex)),
     };
 

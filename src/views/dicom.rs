@@ -294,8 +294,8 @@ impl View for Dicom {
                                     format!("instance node {} missing self_hash", instance_id)
                                 })?;
 
-                                let (_, nifti_bytes) =
-                                    read_object_bytes_in(&self.repo_root, &blob_hash)?;
+                                let nifti_bytes =
+                                    crate::files::lfs::read_file_content_for_write(&self.repo_root, &blob_hash)?;
 
                                 let dcm_bytes = if (nifti_bytes.len() >= 132
                                     && &nifti_bytes[128..132] == b"DICM")
@@ -462,24 +462,36 @@ impl View for Dicom {
 
                                     if should_convert {
                                         let nifti_bytes = dicom_to_nifti2(&disk_path)?;
-                                        let blob_hash = hash_bytes(&nifti_bytes, ObjectType::Blob);
+                                        let rel_path = disk_path.strip_prefix(&self.repo_root).unwrap_or(&disk_path);
 
-                                        make_object_from_bytes_in(
-                                            &nifti_bytes,
-                                            blob_hash,
-                                            ObjectType::Blob,
-                                            &self.repo_root,
-                                        )
-                                        .map_err(|e| {
-                                            format!(
-                                                "failed to save NIfTI blob for {}: {}",
-                                                instance_id, e
+                                        if crate::files::lfs::is_lfs_tracked(&self.repo_root, rel_path) {
+                                            let raw_hash = crate::files::hash::hash_raw(&nifti_bytes);
+                                            crate::files::lfs::stage_lfs_bytes(&self.repo_root, &nifti_bytes, &raw_hash)?;
+                                            let pointer_hash = crate::files::lfs::create_and_store_lfs_pointer(&self.repo_root, &raw_hash)?;
+
+                                            let mut inst = instance_node.borrow_mut();
+                                            inst.self_hash = Some(pointer_hash);
+                                            inst.valid_self_hash = true;
+                                        } else {
+                                            let blob_hash = hash_bytes(&nifti_bytes, ObjectType::Blob);
+
+                                            make_object_from_bytes_in(
+                                                &nifti_bytes,
+                                                blob_hash,
+                                                ObjectType::Blob,
+                                                &self.repo_root,
                                             )
-                                        })?;
+                                            .map_err(|e| {
+                                                format!(
+                                                    "failed to save NIfTI blob for {}: {}",
+                                                    instance_id, e
+                                                )
+                                            })?;
 
-                                        let mut inst = instance_node.borrow_mut();
-                                        inst.self_hash = Some(blob_hash);
-                                        inst.valid_self_hash = true;
+                                            let mut inst = instance_node.borrow_mut();
+                                            inst.self_hash = Some(blob_hash);
+                                            inst.valid_self_hash = true;
+                                        }
                                     }
                                 }
                             }
@@ -671,11 +683,13 @@ mod tests {
         let inst_blob_path = git_med_dir.join("objects").join(&inst_blob_hex[..2]).join(&inst_blob_hex[2..]);
         assert!(inst_blob_path.is_file(), "NIfTI blob object must exist in objects");
 
-        // Verify the blob object content contains the NIfTI-2 header (after git-med object header)
-        let blob_raw = fs::read(&inst_blob_path).unwrap();
-        // Skip git-med object header: "blob <size>\0"
-        let null_pos = blob_raw.iter().position(|&b| b == 0).expect("null separator in object header");
-        let payload = &blob_raw[null_pos + 1..];
+        // Verify the LFS pointer object exists in objects and raw NIfTI-2 file was staged in lfs/objects
+        let (obj_type, body) = read_object_bytes_in(&repo_dir, &inst_borrow.self_hash.unwrap()).unwrap();
+        assert_eq!(obj_type, ObjectType::Lfs);
+        let pointer = crate::files::lfs::LfsPointer::parse(&body).expect("parse lfs pointer");
+        assert!(crate::files::lfs::has_lfs_raw(&repo_dir, &pointer.hash));
+
+        let payload = crate::files::lfs::read_file_content_for_write(&repo_dir, &inst_borrow.self_hash.unwrap()).unwrap();
         let sizeof_hdr = i32::from_le_bytes(payload[0..4].try_into().unwrap());
         assert_eq!(sizeof_hdr, 540, "NIfTI-2 header size must be 540");
         assert_eq!(&payload[4..12], b"n+2\0\r\n\x1a\n", "NIfTI-2 magic mismatch");

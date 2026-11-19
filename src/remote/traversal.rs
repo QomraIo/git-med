@@ -240,7 +240,7 @@ fn traverse_tree(
                     known_remote_hashes,
                 )?;
             }
-            ObjectType::Blob | ObjectType::Meta => {
+            ObjectType::Blob | ObjectType::Meta | ObjectType::Lfs => {
                 if visited_objects.insert(child_hash) {
                     objects.push((child_hash, child_obj_type, child_body));
                 }

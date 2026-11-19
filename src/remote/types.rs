@@ -1,5 +1,28 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use crate::files::hash::Hash;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LfsUploadObjectReq {
+    pub hash: String,
+    pub remote_path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LfsUploadUrlsReq {
+    pub objects: Vec<LfsUploadObjectReq>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LfsUrlsResp {
+    pub urls: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LfsDownloadUrlsReq {
+    pub hashes: Vec<String>,
+}
 
 /// A reference advertised by a remote Git server.
 #[derive(Debug, Clone, PartialEq, Eq)]

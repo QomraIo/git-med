@@ -72,7 +72,7 @@ impl Qomra {
                         let blob_hash = child_node.borrow().self_hash.ok_or_else(|| {
                             format!("leaf node {} missing self_hash", child_node.borrow().id)
                         })?;
-                        let (_, content) = read_object_bytes_in(&self.repo_root, &blob_hash)?;
+                        let content = crate::files::lfs::read_file_content_for_write(&self.repo_root, &blob_hash)?;
                         fs::create_dir_all(current_dir).map_err(|e| {
                             format!("failed to create dir {}: {}", current_dir.display(), e)
                         })?;

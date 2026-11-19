@@ -8,16 +8,18 @@ pub enum ObjectType {
     Meta,
     Tree,
     Commit,
+    Lfs,
 }
 
 impl ObjectType {
-    /// Returns the object header prefix (`"blob"`, `"meta"`, `"tree"`, or `"commit"`).
+    /// Returns the object header prefix (`"blob"`, `"meta"`, `"tree"`, `"commit"`, or `"lfs"`).
     pub fn header_prefix(self) -> &'static str {
         match self {
             Self::Blob => "blob",
             Self::Meta => "meta",
             Self::Tree => "tree",
             Self::Commit => "commit",
+            Self::Lfs => "lfs",
         }
     }
 

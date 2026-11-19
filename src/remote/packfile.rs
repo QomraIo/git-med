@@ -86,14 +86,15 @@ pub fn unpack_packfile_into(pack_bytes: &[u8], repo_root: &Path) -> Result<usize
             1 => ObjectType::Commit,
             2 => ObjectType::Tree,
             3 => ObjectType::Blob,
-            6 | 7 => {
-                return Err(RemoteError::Protocol(
-                    "delta objects (OBJ_OFS_DELTA / OBJ_REF_DELTA) are not supported; packfile must contain base objects only".into(),
-                ));
-            }
             4 => {
                 return Err(RemoteError::Protocol(
                     "OBJ_TAG packfile objects are not currently supported".into(),
+                ));
+            }
+            5 => ObjectType::Lfs,
+            6 | 7 => {
+                return Err(RemoteError::Protocol(
+                    "delta objects (OBJ_OFS_DELTA / OBJ_REF_DELTA) are not supported; packfile must contain base objects only".into(),
                 ));
             }
             other => {
@@ -183,6 +184,7 @@ pub fn create_packfile_bytes(objects: &[(ObjectType, &[u8])]) -> Result<Vec<u8>,
             ObjectType::Commit => 1,
             ObjectType::Tree => 2,
             ObjectType::Blob | ObjectType::Meta => 3,
+            ObjectType::Lfs => 5,
         };
 
         // Variable-length LEB128 header:
@@ -264,5 +266,20 @@ mod tests {
         let pack = create_packfile_bytes(&[obj1, obj2]).unwrap();
         let count = unpack_packfile_into(&pack, &repo.path).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_lfs_object_packfile_roundtrip() {
+        let repo = TempRepo::new("lfs");
+        let lfs_body = b"Origin self\nParent self\nLocal Path self\nRemote Path repo/lfs/123\nHash 1234\n";
+        let obj = (ObjectType::Lfs, lfs_body.as_slice());
+        let pack = create_packfile_bytes(&[obj]).unwrap();
+        let count = unpack_packfile_into(&pack, &repo.path).unwrap();
+        assert_eq!(count, 1);
+
+        let digest = hash_bytes(lfs_body, ObjectType::Lfs);
+        let (read_type, read_bytes) = crate::files::utils::read_object_bytes_in(&repo.path, &digest).unwrap();
+        assert_eq!(read_type, ObjectType::Lfs);
+        assert_eq!(read_bytes, lfs_body);
     }
 }

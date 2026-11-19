@@ -226,7 +226,7 @@ pub fn load_tree_node_in(
                 node.borrow_mut().parent = Some(Rc::downgrade(&current_node));
                 node
             }
-            ObjectType::Blob => {
+            ObjectType::Blob | ObjectType::Lfs => {
                 let node = Node::new(name, ChildrenType::None);
                 {
                     let mut n = node.borrow_mut();

@@ -1,6 +1,5 @@
 use crate::core::tree::{Children, NodeRef};
 use crate::files::hash::Hash;
-use crate::files::utils::read_object_bytes_in;
 use crate::views::traits::View;
 use crate::views::types::{ViewAttributes, ViewAttributesIndex};
 use crate::views::utils::{get_name, git_add_file_in};
@@ -218,7 +217,7 @@ impl View for Brats {
             }
 
             // 1. Write the instance file from blob
-            let (_, blob_bytes) = read_object_bytes_in(&self.repo_root, &entry.blob_hash)?;
+            let blob_bytes = crate::files::lfs::read_file_content_for_write(&self.repo_root, &entry.blob_hash)?;
             fs::write(&full_instance_path, blob_bytes).map_err(|e| {
                 format!(
                     "failed to write instance file {}: {}",
