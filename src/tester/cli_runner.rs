@@ -113,6 +113,13 @@ impl GitMedCli {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// git-med merge [args...]
+    pub fn merge_cmd(&self, merge_args: &[&str]) -> Result<Output, String> {
+        let mut args = vec!["merge"];
+        args.extend_from_slice(merge_args);
+        self.run_cmd(&args)
+    }
+
     /// git-med generate <view> <output_dir> ...
     pub fn generate_for_view(
         &self,

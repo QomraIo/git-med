@@ -641,6 +641,32 @@ mod tests {
                                     let _ = socket.write_all(resp.as_bytes()).await;
                                     let _ = socket.write_all(&pack_bytes).await;
                                 }
+                            } else if req.contains("POST /lfs/download-urls") {
+                                let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+                                let body_bytes = &buf[body_start..n];
+                                if let Ok(req_json) = serde_json::from_slice::<crate::remote::types::LfsDownloadUrlsReq>(body_bytes) {
+                                    let base_url = format!("http://127.0.0.1:{}", port);
+                                    let mut urls = std::collections::HashMap::new();
+                                    for h in req_json.hashes {
+                                        urls.insert(h.clone(), format!("{}/s3-download/{}", base_url, h));
+                                    }
+                                    let resp_json = crate::remote::types::LfsUrlsResp { urls };
+                                    let resp_bytes = serde_json::to_vec(&resp_json).unwrap();
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        resp_bytes.len()
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                    let _ = socket.write_all(&resp_bytes).await;
+                                }
+                            } else if req.contains("GET /s3-download/") {
+                                let raw_bytes = crate::tester::generate::sample::DICOM_SAMPLE.to_vec();
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    raw_bytes.len()
+                                );
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                                let _ = socket.write_all(&raw_bytes).await;
                             }
                         });
                     }

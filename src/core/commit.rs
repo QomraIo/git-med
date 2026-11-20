@@ -13,14 +13,27 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct Commit {
     pub tree: Hash,
     pub parent: Option<String>,
+    pub parents: Vec<String>,
     pub message: String,
 }
 
 impl Commit {
     pub fn new(tree: Hash, parent: Option<String>, message: String) -> Self {
+        let parents = parent.clone().into_iter().collect();
         Self {
             tree,
             parent,
+            parents,
+            message,
+        }
+    }
+
+    pub fn new_with_parents(tree: Hash, parents: Vec<String>, message: String) -> Self {
+        let parent = parents.first().cloned();
+        Self {
+            tree,
+            parent,
+            parents,
             message,
         }
     }
@@ -30,7 +43,14 @@ impl Commit {
     }
 
     pub fn write_in(&self, repo_root: &Path) -> Result<Hash, String> {
-        let body = format_commit_body(&self.tree, self.parent.as_deref(), &self.message);
+        let parents: Vec<String> = if !self.parents.is_empty() {
+            self.parents.clone()
+        } else if let Some(ref p) = self.parent {
+            vec![p.clone()]
+        } else {
+            Vec::new()
+        };
+        let body = format_commit_body_multi(&self.tree, &parents, &self.message);
         let commit_hash = hash_bytes(&body, ObjectType::Commit);
 
         make_object_from_bytes_in(&body, commit_hash, ObjectType::Commit, repo_root)
@@ -43,17 +63,30 @@ impl Commit {
 }
 
 pub fn format_commit_body(tree: &Hash, parent: Option<&str>, message: &str) -> Vec<u8> {
+    let parents: Vec<String> = parent
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .into_iter()
+        .collect();
+    format_commit_body_multi(tree, &parents, message)
+}
+
+pub fn format_commit_body_multi(tree: &Hash, parents: &[String], message: &str) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(tree.to_hex().as_bytes());
     body.push(b'\n');
 
-    if let Some(p) = parent {
-        let trimmed_parent = p.trim();
-        if !trimmed_parent.is_empty() {
-            body.extend_from_slice(trimmed_parent.as_bytes());
+    if parents.is_empty() {
+        body.push(b'\n');
+    } else {
+        for p in parents {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                body.extend_from_slice(trimmed.as_bytes());
+                body.push(b'\n');
+            }
         }
     }
-    body.push(b'\n');
 
     body.extend_from_slice(message.as_bytes());
     if !message.ends_with('\n') {
@@ -215,11 +248,7 @@ pub fn commit_with_message_in(repo_root: &Path, message: &str) -> Result<Hash, S
 
     let _ = tree.save(&tree_index);
 
-    let commit = Commit {
-        tree: tree_hash,
-        parent: head_hash,
-        message: message.to_string(),
-    };
+    let commit = Commit::new(tree_hash, head_hash, message.to_string());
     commit.write_in(repo_root)
 }
 

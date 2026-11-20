@@ -9,6 +9,7 @@ use core::branch::branch;
 use core::clone::clone;
 use core::commit::commit;
 use core::init::init;
+use core::merge::merge;
 use core::pull::pull;
 use core::push::push;
 use core::remote::remote;
@@ -36,6 +37,7 @@ fn main() {
         "clone" => clone(&args),
         "push" => push(&args),
         "pull" => pull(&args),
+        "merge" => merge(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }

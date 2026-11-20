@@ -76,24 +76,20 @@ pub fn collect_objects_to_pack(
             ))
         })?;
 
-        // If parent commit exists, enqueue it if not already known to the remote
-        if let Some(parent_line) = lines.next() {
-            let parent_trimmed = parent_line.trim();
-            if !parent_trimmed.is_empty() {
-                let parent_hash = Hash::from_hex(parent_trimmed).map_err(|e| {
-                    RemoteError::InvalidHash(format!(
-                        "invalid parent hash '{}' in commit {}: {}",
-                        parent_trimmed,
-                        commit_hash.to_hex(),
-                        e
-                    ))
-                })?;
-
+        // If parent commits exist, enqueue them if not already known to the remote
+        for line in lines {
+            let parent_trimmed = line.trim();
+            if parent_trimmed.is_empty() {
+                break;
+            }
+            if let Ok(parent_hash) = Hash::from_hex(parent_trimmed) {
                 if !known_remote_hashes.contains(&parent_hash)
                     && !visited_commits.contains(&parent_hash)
                 {
                     commit_queue.push_back(parent_hash);
                 }
+            } else {
+                break;
             }
         }
 
@@ -312,18 +308,12 @@ pub fn is_ancestor(
         let mut lines = body_str.lines();
         let _tree_line = lines.next();
 
-        if let Some(parent_line) = lines.next() {
-            let parent_trimmed = parent_line.trim();
-            if !parent_trimmed.is_empty() {
-                let parent_hash = Hash::from_hex(parent_trimmed).map_err(|e| {
-                    RemoteError::InvalidHash(format!(
-                        "invalid parent hash '{}' in commit {}: {}",
-                        parent_trimmed,
-                        current.to_hex(),
-                        e
-                    ))
-                })?;
-
+        for line in lines {
+            let parent_trimmed = line.trim();
+            if parent_trimmed.is_empty() {
+                break;
+            }
+            if let Ok(parent_hash) = Hash::from_hex(parent_trimmed) {
                 if parent_hash == *ancestor {
                     return Ok(true);
                 }
@@ -331,6 +321,8 @@ pub fn is_ancestor(
                 if !visited.contains(&parent_hash) {
                     queue.push_back(parent_hash);
                 }
+            } else {
+                break;
             }
         }
     }

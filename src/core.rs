@@ -3,6 +3,7 @@ pub mod branch;
 pub mod clone;
 pub mod commit;
 pub mod init;
+pub mod merge;
 pub mod pull;
 pub mod push;
 pub mod remote;
