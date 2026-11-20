@@ -141,7 +141,11 @@ pub fn read_file_content_for_write(
     match obj_type {
         ObjectType::Lfs => {
             let pointer = LfsPointer::parse(&body)?;
-            let raw_path = lfs_raw_object_path(repo_root, &pointer.hash);
+            let raw_path = if pointer.local_path != "self" && Path::new(&pointer.local_path).is_file() {
+                PathBuf::from(&pointer.local_path)
+            } else {
+                lfs_raw_object_path(repo_root, &pointer.hash)
+            };
             if !raw_path.is_file() {
                 return Err(format!(
                     "missing raw LFS object {} for pointer {}",

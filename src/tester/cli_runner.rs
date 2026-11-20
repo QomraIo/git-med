@@ -104,6 +104,13 @@ impl GitMedCli {
         self.run_cmd(&args)
     }
 
+    /// git-med mix <result_branch> [specs...]
+    pub fn mix_cmd(&self, result_branch: &str, specs: &[&str]) -> Result<Output, String> {
+        let mut args = vec!["mix", result_branch];
+        args.extend_from_slice(specs);
+        self.run_cmd(&args)
+    }
+
     /// git-med view [target_view]
     pub fn view(&self, target_view: Option<&str>) -> Result<String, String> {
         let output = match target_view {

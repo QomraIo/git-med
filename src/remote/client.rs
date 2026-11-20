@@ -475,6 +475,65 @@ impl GitHttpClient {
         })
     }
 
+    /// Fetch a branch's commit and objects from a remote repository into `repo_root/.git-med/objects/`,
+    /// including any missing LFS objects, without switching HEAD or materializing the working tree.
+    pub async fn fetch_branch(
+        &self,
+        repo_url: &str,
+        repo_root: &Path,
+        branch_name: &str,
+    ) -> Result<crate::files::hash::Hash, RemoteError> {
+        let clean_branch = branch_name.trim();
+        if clean_branch.is_empty() {
+            return Err(RemoteError::Protocol("branch name cannot be empty".into()));
+        }
+        let short_branch = clean_branch.strip_prefix("refs/heads/").unwrap_or(clean_branch);
+        let full_ref_name = format!("refs/heads/{}", short_branch);
+
+        // 1. Discover references on remote server
+        let advertisement = self.discover_refs(repo_url).await?;
+
+        // 2. Find target remote commit hash for this ref
+        let remote_ref = advertisement
+            .get_ref(&full_ref_name)
+            .or_else(|| {
+                if short_branch == "HEAD" {
+                    advertisement.get_ref("HEAD")
+                } else if advertisement.default_branch.as_deref().map(|b| b.strip_prefix("refs/heads/").unwrap_or(b)) == Some(short_branch) {
+                    advertisement.get_ref("HEAD")
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| RemoteError::Protocol(format!("branch '{}' not found on remote", short_branch)))?;
+        let remote_hash = remote_ref.hash;
+
+        // 3. If commit is already present locally, check LFS, otherwise fetch packfile
+        let has_commit = crate::files::utils::read_object_bytes_in(repo_root, &remote_hash).is_ok();
+        if !has_commit {
+            let mut wants = Vec::new();
+            for r in &advertisement.refs {
+                if !wants.contains(&r.hash) {
+                    wants.push(r.hash);
+                }
+            }
+            if !wants.contains(&remote_hash) {
+                wants.push(remote_hash);
+            }
+
+            self.fetch_packfile_and_unpack_internal(repo_url, repo_root, &advertisement, &wants)
+                .await?;
+        }
+
+        // 4. Download any missing LFS objects for the fetched commit's tree
+        let tree = crate::files::commit::load_tree_from_commit_in(repo_root, &remote_hash)
+            .map_err(|e| RemoteError::Protocol(format!("failed to load tree from commit {}: {}", remote_hash.to_hex(), e)))?;
+
+        self.download_lfs_objects_for_tree(repo_url, repo_root, &tree.root).await?;
+
+        Ok(remote_hash)
+    }
+
     /// Discover remote references for pushing via `GET $REPO_URL/info/refs?service=git-receive-pack`.
     pub async fn discover_push_refs(&self, repo_url: &str) -> Result<RefAdvertisement, RemoteError> {
         let trimmed_url = repo_url.trim_end_matches('/');
@@ -652,7 +711,11 @@ impl GitHttpClient {
             if *obj_type == crate::files::types::ObjectType::Lfs {
                 let pointer = crate::files::lfs::LfsPointer::parse(body)
                     .map_err(|e| RemoteError::Protocol(format!("invalid LFS pointer object: {}", e)))?;
-                let raw_path = crate::files::lfs::lfs_raw_object_path(repo_root, &pointer.hash);
+                let raw_path = if pointer.local_path != "self" && std::path::Path::new(&pointer.local_path).is_file() {
+                    std::path::PathBuf::from(&pointer.local_path)
+                } else {
+                    crate::files::lfs::lfs_raw_object_path(repo_root, &pointer.hash)
+                };
                 if !raw_path.is_file() {
                     return Err(RemoteError::Protocol(format!(
                         "missing raw LFS file on disk at {} for hash {}",

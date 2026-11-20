@@ -154,6 +154,10 @@ pub fn unpack_packfile_into(pack_bytes: &[u8], repo_root: &Path) -> Result<usize
         // 6. Compute object hash and write directly into .git-med/objects/
         let digest = hash_bytes(&decompressed, obj_type);
         make_object_from_bytes_in(&decompressed, digest, obj_type, repo_root)?;
+        if obj_type == ObjectType::Blob {
+            let meta_digest = hash_bytes(&decompressed, ObjectType::Meta);
+            let _ = make_object_from_bytes_in(&decompressed, meta_digest, ObjectType::Meta, repo_root);
+        }
 
         unpacked_count += 1;
     }
