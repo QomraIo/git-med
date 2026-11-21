@@ -299,7 +299,7 @@ fn count_objects_recursive(dir: &Path) -> usize {
 }
 
 fn find_git_med_bin() -> PathBuf {
-    // 1. Check CARGO_BIN_EXE_git-med (available when running cargo test)
+    // 1. Check CARGO_BIN_EXE_git-med (available when running integration tests)
     if let Ok(bin) = std::env::var("CARGO_BIN_EXE_git-med") {
         let p = PathBuf::from(bin);
         if p.exists() {
@@ -307,7 +307,22 @@ fn find_git_med_bin() -> PathBuf {
         }
     }
 
-    // 2. Check target/debug/git-med relative to CARGO_MANIFEST_DIR
+    // 2. Derive from current running test executable path
+    // e.g., target/debug/deps/git_med-<hash> -> target/debug/git-med
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(deps_dir) = current_exe.parent() {
+            if deps_dir.ends_with("deps") {
+                if let Some(profile_dir) = deps_dir.parent() {
+                    let candidate = profile_dir.join("git-med");
+                    if candidate.exists() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Check target/debug/git-med relative to CARGO_MANIFEST_DIR
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let p = PathBuf::from(manifest_dir).join("target/debug/git-med");
         if p.exists() {
@@ -315,12 +330,16 @@ fn find_git_med_bin() -> PathBuf {
         }
     }
 
-    // 3. Fallback to current dir target/debug/git-med
-    let fallback = PathBuf::from("target/debug/git-med");
-    if fallback.exists() {
-        return fallback;
+    // 4. Fallback to local target paths
+    let debug_fallback = PathBuf::from("target/debug/git-med");
+    if debug_fallback.exists() {
+        return debug_fallback;
+    }
+    let release_fallback = PathBuf::from("target/release/git-med");
+    if release_fallback.exists() {
+        return release_fallback;
     }
 
-    // 4. Default to git-med on PATH
+    // 5. Default to git-med on PATH
     PathBuf::from("git-med")
 }
