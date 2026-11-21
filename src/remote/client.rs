@@ -16,6 +16,7 @@ use crate::remote::types::{FetchResult, PullResult, PushResult, RefAdvertisement
 #[derive(Debug, Clone)]
 pub struct GitHttpClient {
     client: reqwest::Client,
+    token: Option<String>,
 }
 
 impl Default for GitHttpClient {
@@ -30,12 +31,57 @@ impl GitHttpClient {
         let client = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self { client, token: None }
     }
 
     /// Create a `GitHttpClient` with a custom configured `reqwest::Client`.
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self { client, token: None }
+    }
+
+    /// Create a `GitHttpClient` with an explicit bearer token.
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
+    /// Create a `GitHttpClient` initialized with stored credentials for `repo_url`.
+    pub fn for_url(repo_url: &str) -> Self {
+        let token = crate::core::auth::get_token_for_url(repo_url);
+        Self {
+            client: reqwest::Client::builder()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            token,
+        }
+    }
+
+    fn resolve_token(&self, url: &str) -> Option<String> {
+        self.token.clone().or_else(|| crate::core::auth::get_token_for_url(url))
+    }
+
+    fn apply_auth(&self, req: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        if let Some(token) = self.resolve_token(url) {
+            req.header("Authorization", format!("Bearer {}", token))
+        } else {
+            req
+        }
+    }
+
+    fn check_auth_status(status: reqwest::StatusCode, url: &str, msg: String) -> RemoteError {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            RemoteError::Protocol(format!(
+                "Authentication failed (HTTP {}). Run 'git-med login --server {}' to authenticate. Details: {}",
+                status,
+                crate::core::auth::extract_server_origin(url),
+                msg
+            ))
+        } else {
+            RemoteError::HttpStatus {
+                status: status.as_u16(),
+                message: msg,
+            }
+        }
     }
 
     /// Discover references from a remote repository via Git Smart HTTP.
@@ -48,14 +94,14 @@ impl GitHttpClient {
         let trimmed_url = repo_url.trim_end_matches('/');
         let info_refs_url = format!("{}/info/refs?service=git-upload-pack", trimmed_url);
 
-        let response = self
+        let req = self
             .client
             .get(&info_refs_url)
             .header("Git-Protocol", "version=2")
             .header("Accept", "application/x-git-upload-pack-advertisement")
-            .header("User-Agent", "git-med/0.1.0")
-            .send()
-            .await?;
+            .header("User-Agent", "git-med/0.1.0");
+
+        let response = self.apply_auth(req, repo_url).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -63,10 +109,7 @@ impl GitHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: msg,
-            });
+            return Err(Self::check_auth_status(status, repo_url, msg));
         }
 
         let bytes = response.bytes().await?;
@@ -78,16 +121,16 @@ impl GitHttpClient {
                 let upload_pack_url = format!("{}/git-upload-pack", trimmed_url);
                 let ls_refs_payload = build_v2_ls_refs_request()?;
 
-                let post_response = self
+                let post_req = self
                     .client
                     .post(&upload_pack_url)
                     .header("Git-Protocol", "version=2")
                     .header("Content-Type", "application/x-git-upload-pack-request")
                     .header("Accept", "application/x-git-upload-pack-result")
                     .header("User-Agent", "git-med/0.1.0")
-                    .body(ls_refs_payload)
-                    .send()
-                    .await?;
+                    .body(ls_refs_payload);
+
+                let post_response = self.apply_auth(post_req, repo_url).send().await?;
 
                 let post_status = post_response.status();
                 if !post_status.is_success() {
@@ -95,10 +138,7 @@ impl GitHttpClient {
                         .text()
                         .await
                         .unwrap_or_else(|_| "unknown error".into());
-                    return Err(RemoteError::HttpStatus {
-                        status: post_status.as_u16(),
-                        message: msg,
-                    });
+                    return Err(Self::check_auth_status(post_status, repo_url, msg));
                 }
 
                 let post_bytes = post_response.bytes().await?;
@@ -147,6 +187,8 @@ impl GitHttpClient {
             request = request.header("Git-Protocol", "version=2");
         }
 
+        request = self.apply_auth(request, repo_url);
+
         let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
@@ -154,10 +196,7 @@ impl GitHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: msg,
-            });
+            return Err(Self::check_auth_status(status, repo_url, msg));
         }
 
         // Demultiplex side-band 64k response and extract packfile bytes
@@ -539,13 +578,13 @@ impl GitHttpClient {
         let trimmed_url = repo_url.trim_end_matches('/');
         let info_refs_url = format!("{}/info/refs?service=git-receive-pack", trimmed_url);
 
-        let response = self
+        let req = self
             .client
             .get(&info_refs_url)
             .header("Accept", "application/x-git-receive-pack-advertisement")
-            .header("User-Agent", "git-med/0.1.0")
-            .send()
-            .await?;
+            .header("User-Agent", "git-med/0.1.0");
+
+        let response = self.apply_auth(req, repo_url).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -553,10 +592,7 @@ impl GitHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: msg,
-            });
+            return Err(Self::check_auth_status(status, repo_url, msg));
         }
 
         let bytes = response.bytes().await?;
@@ -645,15 +681,15 @@ impl GitHttpClient {
         let trimmed_url = repo_url.trim_end_matches('/');
         let receive_pack_url = format!("{}/git-receive-pack", trimmed_url);
 
-        let response = self
+        let post_req = self
             .client
             .post(&receive_pack_url)
             .header("Content-Type", "application/x-git-receive-pack-request")
             .header("Accept", "application/x-git-receive-pack-result")
             .header("User-Agent", "git-med/0.1.0")
-            .body(request_body)
-            .send()
-            .await?;
+            .body(request_body);
+
+        let response = self.apply_auth(post_req, repo_url).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -661,10 +697,7 @@ impl GitHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: msg,
-            });
+            return Err(Self::check_auth_status(status, repo_url, msg));
         }
 
         let response_bytes = response.bytes().await?;
@@ -746,13 +779,13 @@ impl GitHttpClient {
         let body_bytes = serde_json::to_vec(&req_payload)
             .map_err(|e| RemoteError::Protocol(format!("failed to serialize JSON: {}", e)))?;
 
-        let resp = self
+        let post_req = self
             .client
             .post(&upload_urls_endpoint)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await?;
+            .body(body_bytes);
+
+        let resp = self.apply_auth(post_req, repo_url).send().await?;
 
         let status = resp.status();
         if status.as_u16() == 501 || status.as_u16() == 503 {
@@ -762,10 +795,11 @@ impl GitHttpClient {
         }
         if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: format!("LFS upload-urls failed: {}", err_text),
-            });
+            return Err(Self::check_auth_status(
+                status,
+                repo_url,
+                format!("LFS upload-urls failed: {}", err_text),
+            ));
         }
 
         let resp_bytes = resp.bytes().await?;
@@ -823,13 +857,13 @@ impl GitHttpClient {
         let body_bytes = serde_json::to_vec(&req_payload)
             .map_err(|e| RemoteError::Protocol(format!("failed to serialize JSON: {}", e)))?;
 
-        let resp = self
+        let post_req = self
             .client
             .post(&download_urls_endpoint)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await?;
+            .body(body_bytes);
+
+        let resp = self.apply_auth(post_req, repo_url).send().await?;
 
         let status = resp.status();
         if status.as_u16() == 501 || status.as_u16() == 503 {
@@ -839,10 +873,11 @@ impl GitHttpClient {
         }
         if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
-            return Err(RemoteError::HttpStatus {
-                status: status.as_u16(),
-                message: format!("LFS download-urls failed: {}", err_text),
-            });
+            return Err(Self::check_auth_status(
+                status,
+                repo_url,
+                format!("LFS download-urls failed: {}", err_text),
+            ));
         }
 
         let resp_bytes = resp.bytes().await?;

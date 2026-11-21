@@ -5,6 +5,7 @@ mod tester;
 mod views;
 
 use core::add::add;
+use core::auth::{login, logout, whoami};
 use core::branch::branch;
 use core::clone::clone;
 use core::commit::commit;
@@ -40,6 +41,9 @@ fn main() {
         "pull" => pull(&args),
         "merge" => merge(&args),
         "mix" => mix(&args),
+        "login" => login(&args),
+        "logout" => logout(&args),
+        "whoami" => whoami(&args),
         "generate" => generate(&args),
         _ => println!("Unknown command: {}", command),
     }
