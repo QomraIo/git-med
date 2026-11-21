@@ -7,13 +7,42 @@ description: Getting started with git-med installation, build, and basic usage
 
 ---
 
-## Prerequisites
+## Installation
 
-- **Rust & Cargo**: Rust 1.85+ with 2024 edition support ([Install Rust](https://www.rust-lang.org/tools/install))
+### Option 1: Install Prebuilt Binaries (Recommended)
+
+Prebuilt binaries are published with each release on the [GitHub Releases page](https://github.com/QomraIo/git-med/releases).
+
+#### Ubuntu / Linux (x86_64)
+```bash
+# Download latest Linux release archive
+curl -LO https://github.com/QomraIo/git-med/releases/latest/download/git-med-linux-x86_64.tar.gz
+
+# Extract archive
+tar -xzf git-med-linux-x86_64.tar.gz
+
+# Install to /usr/local/bin
+sudo install -m 755 git-med /usr/local/bin/
+```
+
+#### macOS (Apple Silicon ARM64)
+```bash
+# Download latest macOS Apple Silicon archive
+curl -LO https://github.com/QomraIo/git-med/releases/latest/download/git-med-macos-arm64.tar.gz
+
+# Extract archive
+tar -xzf git-med-macos-arm64.tar.gz
+
+# Install to /usr/local/bin
+sudo install -m 755 git-med /usr/local/bin/
+
+# Clear macOS quarantine flag if prompted
+xattr -d com.apple.quarantine /usr/local/bin/git-med
+```
 
 ---
 
-## Build Commands
+### Option 2: Build from Source
 
 Compile `git-med` from source:
 

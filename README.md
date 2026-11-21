@@ -8,6 +8,7 @@
 - Switch between diffrent standerds like DICOM, BIDS ...etc.
 - Lazy download (VFS, FUSE, NFS, ...)
 - Compression (xet, atlas based compression,...)
+- File format converter with zero copy
 - Fast, secure, scalable and open. 
 
 In current version we opted for building everything thing from scratch, make the architecture modular, write parts we need to understand deeply by hand and prototype the rest with LLMs. The goal is to evolve this system to power future PACS/VNA (Vendor Neutral Archive) systems and AI research tools.
@@ -18,13 +19,55 @@ Mainly, Antigravity with Gemini 3.8 High was used. Claude Opus 4.6 was occasiona
 
 ---
 
-## Getting Started
+## Installation
 
-### Prerequisites
+### Option 1: Install Prebuilt Binaries (Recommended)
+
+Prebuilt standalone binaries are available on the [Releases page](https://github.com/QomraIo/git-med/releases).
+
+#### Ubuntu / Linux (x86_64)
+```bash
+# 1. Download the latest Linux archive
+curl -LO https://github.com/QomraIo/git-med/releases/latest/download/git-med-linux-x86_64.tar.gz
+
+# 2. Extract the archive
+tar -xzf git-med-linux-x86_64.tar.gz
+
+# 3. Install to /usr/local/bin (system-wide)
+sudo install -m 755 git-med /usr/local/bin/
+
+# Or install for the current user without sudo:
+mkdir -p ~/.local/bin && cp git-med ~/.local/bin/
+```
+
+#### macOS (Apple Silicon ARM64)
+```bash
+# 1. Download the latest macOS Apple Silicon archive
+curl -LO https://github.com/QomraIo/git-med/releases/latest/download/git-med-macos-arm64.tar.gz
+
+# 2. Extract the archive
+tar -xzf git-med-macos-arm64.tar.gz
+
+# 3. Install to /usr/local/bin (system-wide)
+sudo install -m 755 git-med /usr/local/bin/
+
+# 4. If macOS Gatekeeper displays an untrusted developer warning:
+xattr -d com.apple.quarantine /usr/local/bin/git-med
+```
+
+#### Verify Installation
+```bash
+git-med whoami
+```
+
+---
+
+### Option 2: Build from Source
+
+#### Prerequisites
 - [Rust & Cargo](https://www.rust-lang.org/tools/install) (Rust 1.85+ with 2024 edition support)
 
-### Build Commands
-
+#### Build Commands
 ```bash
 # Build debug binary (located in ./target/debug/git-med)
 cargo build
@@ -32,53 +75,62 @@ cargo build
 # Build optimized release binary (located in ./target/release/git-med)
 cargo build --release
 
-# Install binary to ~/.cargo/bin (enables `git-med` globally on PATH)
+# Install binary directly to ~/.cargo/bin (enables `git-med` on PATH)
 cargo install --path .
 ```
 
-### Run Commands
+---
 
-#### Running via Cargo
-Pass arguments to `git-med` by placing them after `--`:
+## Usage Examples
+
+Once installed, invoke `git-med` directly from any directory:
+
 ```bash
-# General syntax
-cargo run -- <command> [arguments...]
+# 1. Initialize a new medical dataset repository
+git-med init my-dataset
+cd my-dataset
 
-# Examples:
-# Initialize a new repository
-cargo run -- init my-dataset
+# 2. Generate synthetic medical test data (e.g. DICOM series)
+git-med generate dicom ./data 2 1 3
 
-# Generate synthetic medical test data (e.g. DICOM series)
-cargo run -- generate dicom ./my-dataset 2 1 3
+# 3. Stage changes (parses medical metadata and routes binary payloads to LFS)
+git-med add
 
-# Stage changes according to active medical view
-cargo run -- add
+# 4. Commit staged dataset
+git-med commit -m "Initial medical dataset import"
 
-# Commit staged changes
-cargo run -- commit -m "Initial medical dataset commit"
+# 5. Switch active imaging view (qomra, dicom, brats)
+git-med view dicom
 
-# Switch or query dataset view (qomra, dicom, brats)
-cargo run -- view dicom
+# 6. Authenticate and push to remote forge server
+git-med remote add origin http://localhost:3000/alice/my-dataset.git
+git-med login --server http://localhost:3000 --username alice --password secret
+git-med push origin main
 ```
 
-#### Running the Compiled Binary Directly
-```bash
-# Run debug binary
-./target/debug/git-med <command> [arguments...]
+---
 
-# Run release binary
-./target/release/git-med <command> [arguments...]
-
-# Run installed CLI (when ~/.cargo/bin is in PATH)
-git-med <command> [arguments...]
-```
-
-### Running Tests
+## Running Tests
 
 ```bash
-# Run unit and integration tests
+# Run full unit and integration test suite (136 tests)
 cargo test
 ```
+
+---
+
+## Releasing & Tagging (Maintainers)
+
+Automated GitHub Actions pipelines test and build Ubuntu and macOS binaries on every release tag:
+
+```bash
+# 1. Create a version tag
+git tag v0.1.0
+
+# 2. Push tag to GitHub
+git push origin v0.1.0
+```
+This triggers the CI pipeline to run tests, compile binaries, and publish a GitHub Release with `git-med-linux-x86_64.tar.gz`, `git-med-macos-arm64.tar.gz`, and a verified `SHA256SUMS` file.
 
 ---
 
