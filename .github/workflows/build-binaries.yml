@@ -1,0 +1,137 @@
+name: Test and Build Binaries
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Run Full Test Suite on Ubuntu and macOS
+  # -------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run unit & integration tests
+        run: cargo test --all --verbose
+
+  # -------------------------------------------------------------
+  # Job 2: Build Ubuntu Linux x86_64 Binary
+  # -------------------------------------------------------------
+  build-linux:
+    name: Build Ubuntu Linux (x86_64)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Strip & Package
+        run: |
+          strip target/release/git-med
+          mkdir -p staging
+          cp target/release/git-med staging/
+          cp README.md staging/
+          tar -czvf git-med-linux-x86_64.tar.gz -C staging git-med README.md
+          sha256sum git-med-linux-x86_64.tar.gz > git-med-linux-x86_64.tar.gz.sha256
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-med-linux-x86_64
+          path: |
+            git-med-linux-x86_64.tar.gz
+            git-med-linux-x86_64.tar.gz.sha256
+
+  # -------------------------------------------------------------
+  # Job 3: Build macOS Apple Silicon (ARM64) Binary
+  # -------------------------------------------------------------
+  build-macos:
+    name: Build macOS (Apple Silicon ARM64)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Apple Silicon (ARM64) release binary
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Strip & Package
+        run: |
+          mkdir -p arm64-staging
+          cp target/aarch64-apple-darwin/release/git-med arm64-staging/
+          cp README.md arm64-staging/
+          strip arm64-staging/git-med
+          tar -czvf git-med-macos-arm64.tar.gz -C arm64-staging git-med README.md
+          shasum -a 256 git-med-macos-arm64.tar.gz > git-med-macos-arm64.tar.gz.sha256
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-med-macos-arm64
+          path: |
+            git-med-macos-arm64.tar.gz
+            git-med-macos-arm64.tar.gz.sha256
+
+  # -------------------------------------------------------------
+  # Job 4: Publish GitHub Release (Triggers on Git tag 'v*')
+  # -------------------------------------------------------------
+  release:
+    name: Publish Release Assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Combined SHA256SUMS File
+        run: |
+          cat */*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            */*.tar.gz
+            SHA256SUMS
+          generate_release_notes: true
