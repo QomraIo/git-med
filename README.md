@@ -84,8 +84,9 @@ cargo test
 
 ## Documentation
 
-Full documentation is available in the [`docs/`](docs/README.md) directory:
-* [CLI Commands Reference](docs/commands.md): Details, usage syntax, and Git comparisons for all 15 commands.
-* [Authentication Guide](docs/authentication.md): Architecture, credential management, Auth0 integration, and access control.
+* **Online Documentation (Astro Starlight)**: [https://qomraio.github.io/git-med/](https://qomraio.github.io/git-med/)
+* **Local Docs**: Available in the [`docs/`](docs/README.md) directory.
+  * [CLI Commands Reference](docs/commands.md): Details, usage syntax, and Git comparisons for all 15 commands.
+  * [Authentication Guide](docs/authentication.md): Architecture, credential management, Auth0 integration, and access control.
 
 
