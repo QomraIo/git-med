@@ -8,25 +8,24 @@ pub enum ObjectType {
     Meta,
     Tree,
     Commit,
+    Lfs,
 }
 
 impl ObjectType {
-    /// Returns the object header prefix (`"blob"`, `"meta"`, `"tree"`, or `"commit"`).
+    /// Returns the object header prefix (`"blob"`, `"meta"`, `"tree"`, `"commit"`, or `"lfs"`).
     pub fn header_prefix(self) -> &'static str {
         match self {
             Self::Blob => "blob",
             Self::Meta => "meta",
             Self::Tree => "tree",
             Self::Commit => "commit",
+            Self::Lfs => "lfs",
         }
     }
 
     /// Returns the object store directory name under `.git-med/`.
     pub fn dir_name(self) -> &'static str {
-        match self {
-            Self::Blob | Self::Tree | Self::Commit => "objects",
-            Self::Meta => "meta_objects",
-        }
+        "objects"
     }
 }
 

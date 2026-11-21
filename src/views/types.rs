@@ -9,11 +9,11 @@ pub struct ViewAttributes<'a> {
 }
 
 pub struct ViewAttributesIndex {
-    pub subject: Option<[u8; 16]>,
-    pub study: Option<[u8; 16]>,
-    pub series: Option<[u8; 16]>,
-    pub instance: Option<[u8; 16]>,
+    pub subject: Option<String>,
+    pub study: Option<String>,
+    pub series: Option<String>,
+    pub instance: Option<String>,
 
-    pub source: Option<[u8; 16]>,
-    pub task: Option<[u8; 16]>,
+    pub source: Option<String>,
+    pub task: Option<String>,
 }

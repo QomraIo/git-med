@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const BRATS_SAMPLE: &[u8] = include_bytes!("data/BraTS.nii.gz");
-const DICOM_SAMPLE: &[u8] =
+pub const BRATS_SAMPLE: &[u8] = include_bytes!("data/BraTS.nii.gz");
+pub const DICOM_SAMPLE: &[u8] =
     include_bytes!("data/1.3.12.2.1107.5.2.19.45594.2018071915225876779003334.dcm");
 
 pub fn brats(root: &Path, n_subjects: usize, study_per_subjects: usize, file_per_study: usize) {
@@ -115,12 +115,16 @@ pub fn qomra(
         tasks.to_vec()
     };
 
-    for task in tasks_to_generate {
-        let sources: &[&str] = match task {
-            "data" => &["clinic", "k-space"],
-            "segmentation" => &["consensus", "model_v1"],
-            "localisation" => &["annotator_1", "detector_model"],
-            _ => &["default_source"],
+    for task_spec in tasks_to_generate {
+        let (task, sources): (&str, &[&str]) = match task_spec {
+            "data" => ("data", &["clinic", "k-space"][..]),
+            "clinic" | "data:clinic" => ("data", &["clinic"][..]),
+            "k-space" | "data:k-space" => ("data", &["k-space"][..]),
+            "segmentation" => ("segmentation", &["consensus", "model_v1"][..]),
+            "consensus" | "segmentation:consensus" => ("segmentation", &["consensus"][..]),
+            "model_v1" | "segmentation:model_v1" => ("segmentation", &["model_v1"][..]),
+            "localisation" => ("localisation", &["annotator_1", "detector_model"][..]),
+            _ => (task_spec, &["default_source"][..]),
         };
 
         for source in sources {

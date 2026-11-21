@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+pub use crate::files::hash::{
+    ActiveAlgorithm, Hash, HashAlgorithm, HashError, hash, hash_bytes, hash_raw, object_header,
+};
 use crate::files::types::{FileMetadata, ObjectType};
-use blake3::Hash;
 use std::fs::File;
 use std::fs::{self, OpenOptions, symlink_metadata};
 use std::io::Result;
@@ -10,10 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const IO_BUFFER_SIZE: usize = 64 * 1024;
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn object_header(obj_type: ObjectType, byte_len: u64) -> Vec<u8> {
-    format!("{} {}\0", obj_type.header_prefix(), byte_len).into_bytes()
-}
 
 pub fn time_format(time_: SystemTime) -> (u64, u32) {
     let duration = time_
@@ -39,37 +38,12 @@ pub fn get_file_metadata(path: &Path) -> FileMetadata {
     }
 }
 
-/// Compute the Git-style single-pass BLAKE3 object hash (`"<type> <len>\0" || content`).
-pub fn hash(path: &Path, size: Option<u64>, obj_type: ObjectType) -> Hash {
-    // in future size will be used to chose rayon, mmap or not
-    let byte_len = match size {
-        Some(len) => len,
-        None => fs::metadata(path)
-            .expect("Failed to read file metadata")
-            .len(),
-    };
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&object_header(obj_type, byte_len));
-    hasher.update_mmap_rayon(path).expect("Failed to hash file");
-
-    hasher.finalize()
-}
-
-/// Compute the Git-style single-pass BLAKE3 object hash from in-memory bytes (`"<type> <len>\0" || bytes`).
-pub fn hash_bytes(bytes: &[u8], obj_type: ObjectType) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&object_header(obj_type, bytes.len() as u64));
-    hasher.update(bytes);
-    hasher.finalize()
-}
-
-/// Write a Git-style uncompressed object atomically under `.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Write a Git-style uncompressed object atomically under `.git-med/objects/{dir}/{filename}`.
 pub fn make_object(path: &Path, hash: Hash, obj_type: ObjectType) -> Result<()> {
     make_object_in(path, hash, obj_type, Path::new("."))
 }
 
-/// Write an in-memory Git-style object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Write an in-memory Git-style object atomically under `<repo_root>/.git-med/objects/{dir}/{filename}`.
 pub fn make_object_from_bytes_in(
     bytes: &[u8],
     hash: Hash,
@@ -131,7 +105,57 @@ pub fn make_object_from_bytes_in(
     Ok(())
 }
 
-/// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/{objects|meta_objects}/{dir}/{filename}`.
+/// Read an object's type and content payload from `<repo_root>/.git-med/objects/{dir}/{filename}`.
+pub fn read_object_bytes_in(
+    repo_root: &Path,
+    hash: &Hash,
+) -> std::result::Result<(ObjectType, Vec<u8>), String> {
+    let hex = hash.to_hex();
+    let dir = &hex[..2];
+    let filename = &hex[2..];
+
+    let path = repo_root.join(".git-med/objects").join(dir).join(filename);
+    if !path.is_file() {
+        return Err(format!("object {} not found", hex));
+    }
+
+    let bytes = fs::read(&path)
+        .map_err(|e| format!("failed to read object {}: {}", path.display(), e))?;
+
+    let null_pos = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| format!("corrupted object {}: missing null header delimiter", hex))?;
+
+    let header_str = std::str::from_utf8(&bytes[..null_pos])
+        .map_err(|e| format!("corrupted object header in {}: {}", hex, e))?;
+
+    let mut parts = header_str.split_whitespace();
+    let type_str = parts
+        .next()
+        .ok_or_else(|| "missing type in object header".to_string())?;
+    let _len_str = parts
+        .next()
+        .ok_or_else(|| "missing length in object header".to_string())?;
+
+    let obj_type = match type_str {
+        "tree" => ObjectType::Tree,
+        "blob" => ObjectType::Blob,
+        "commit" => ObjectType::Commit,
+        "meta" => ObjectType::Meta,
+        "lfs" => ObjectType::Lfs,
+        other => return Err(format!("unknown object type '{}' in {}", other, hex)),
+    };
+
+    let body = bytes[null_pos + 1..].to_vec();
+    Ok((obj_type, body))
+}
+
+pub fn read_object_bytes(hash: &Hash) -> std::result::Result<(ObjectType, Vec<u8>), String> {
+    read_object_bytes_in(Path::new("."), hash)
+}
+
+/// Write a Git-style uncompressed object atomically under `<repo_root>/.git-med/objects/{dir}/{filename}`.
 pub fn make_object_in(
     path: &Path,
     hash: Hash,
@@ -262,7 +286,7 @@ mod tests {
             let mut expected_bytes =
                 format!("{} {}\0", obj_type.header_prefix(), payload.len()).into_bytes();
             expected_bytes.extend_from_slice(payload);
-            let expected_digest = blake3::hash(&expected_bytes);
+            let expected_digest = hash_raw(&expected_bytes);
 
             assert_eq!(digest_auto, expected_digest);
             assert_eq!(digest_with_size, expected_digest);
@@ -291,19 +315,21 @@ mod tests {
             let obj_path = expected_object_path(&repo_root, digest, obj_type);
             assert!(obj_path.exists());
 
-            let other_type = match obj_type {
-                ObjectType::Blob => ObjectType::Meta,
-                ObjectType::Meta => ObjectType::Blob,
-                ObjectType::Tree | ObjectType::Commit => ObjectType::Meta,
-            };
-            assert!(!repo_root.join(".git-med").join(other_type.dir_name()).exists());
+            assert!(!repo_root.join(".git-med/meta_objects").exists());
+            assert_eq!(
+                obj_path,
+                repo_root
+                    .join(".git-med/objects")
+                    .join(&digest.to_hex()[..2])
+                    .join(&digest.to_hex()[2..])
+            );
 
             let obj_bytes = fs::read(&obj_path).unwrap();
             let mut expected =
                 format!("{} {}\0", obj_type.header_prefix(), payload.len()).into_bytes();
             expected.extend_from_slice(payload);
             assert_eq!(obj_bytes, expected);
-            assert_eq!(blake3::hash(&obj_bytes), digest);
+            assert_eq!(hash_raw(&obj_bytes), digest);
 
             let entries: Vec<_> = fs::read_dir(obj_path.parent().unwrap())
                 .unwrap()
@@ -326,7 +352,7 @@ mod tests {
         let obj_path = expected_object_path(&repo_root, digest, ObjectType::Blob);
         let obj_bytes = fs::read(&obj_path).unwrap();
         assert_eq!(obj_bytes, b"blob 0\0");
-        assert_eq!(blake3::hash(&obj_bytes), digest);
+        assert_eq!(hash_raw(&obj_bytes), digest);
     }
 
     #[test]
@@ -347,7 +373,7 @@ mod tests {
         let expected_header = format!("blob {}\0", payload.len()).into_bytes();
         assert_eq!(&obj_bytes[..expected_header.len()], &expected_header[..]);
         assert_eq!(&obj_bytes[expected_header.len()..], &payload[..]);
-        assert_eq!(blake3::hash(&obj_bytes), digest);
+        assert_eq!(hash_raw(&obj_bytes), digest);
     }
 
     #[test]
@@ -371,7 +397,7 @@ mod tests {
         let tmp = TempDir::new("missing");
         let repo_root = tmp.path.join("repo");
         let missing_src = tmp.path.join("does_not_exist.dcm");
-        let dummy_digest = blake3::hash(b"blob 0\0");
+        let dummy_digest = hash_raw(b"blob 0\0");
 
         let err = make_object_in(&missing_src, dummy_digest, ObjectType::Blob, &repo_root)
             .unwrap_err();

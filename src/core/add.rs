@@ -1,13 +1,11 @@
 use crate::core::tree::load_or_init_tree;
-use crate::core::tree::{ChildrenType, NodeRef, Tree, get_or_insert_child, get_or_insert_meta};
+use crate::core::tree::{ChildrenType, NodeRef, get_or_insert_child, get_or_insert_meta};
 use crate::views::qomra::is_metafile;
 use crate::views::traits::View;
-use crate::views::utils::bytes2buf128;
 use crate::views::{self, get_view_in};
 use regex::Regex;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
@@ -127,10 +125,14 @@ fn index_file_with_view(
     root: &NodeRef,
     view: &mut dyn View,
 ) -> Result<(), String> {
+    if !view.is_trackable(rel_path) {
+        return Ok(());
+    }
+
     let attrs = view.index(rel_path);
     let file_id = rel_path
         .file_name()
-        .map(|n| bytes2buf128(n.as_bytes()))
+        .and_then(|n| n.to_str())
         .ok_or_else(|| format!("missing file name for {}", rel_path.display()))?;
     let err_msg = || format!("failed to index {}", rel_path.display());
 
@@ -140,7 +142,7 @@ fn index_file_with_view(
         return Ok(());
     };
     let task_node =
-        get_or_insert_child(root, task_id, ChildrenType::Attributes).map_err(|_| err_msg())?;
+        get_or_insert_child(root, &task_id, ChildrenType::Attributes).map_err(|_| err_msg())?;
 
     let Some(source_id) = attrs.source else {
         let meta_node = get_or_insert_meta(&task_node, file_id);
@@ -148,7 +150,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node]);
         return Ok(());
     };
-    let source_node = get_or_insert_child(&task_node, source_id, ChildrenType::Attributes)
+    let source_node = get_or_insert_child(&task_node, &source_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(subject_id) = attrs.subject else {
@@ -158,7 +160,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node, &source_node]);
         return Ok(());
     };
-    let subject_node = get_or_insert_child(&source_node, subject_id, ChildrenType::Attributes)
+    let subject_node = get_or_insert_child(&source_node, &subject_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(study_id) = attrs.study else {
@@ -168,7 +170,7 @@ fn index_file_with_view(
         mark_visited(&[&task_node, &source_node, &subject_node]);
         return Ok(());
     };
-    let study_node = get_or_insert_child(&subject_node, study_id, ChildrenType::Attributes)
+    let study_node = get_or_insert_child(&subject_node, &study_id, ChildrenType::Attributes)
         .map_err(|_| err_msg())?;
 
     let Some(series_id) = attrs.series else {
@@ -187,7 +189,7 @@ fn index_file_with_view(
         return Ok(());
     };
     let series_node =
-        get_or_insert_child(&study_node, series_id, ChildrenType::Files).map_err(|_| err_msg())?;
+        get_or_insert_child(&study_node, &series_id, ChildrenType::Files).map_err(|_| err_msg())?;
 
     let Some(instance_id) = attrs.instance else {
         let meta_node = get_or_insert_meta(&series_node, file_id);
@@ -212,7 +214,7 @@ fn index_file_with_view(
         return Ok(());
     };
 
-    let instance_node = get_or_insert_child(&series_node, instance_id, ChildrenType::None)
+    let instance_node = get_or_insert_child(&series_node, &instance_id, ChildrenType::None)
         .map_err(|_| err_msg())?;
     let target_node = if is_metafile(rel_path) {
         get_or_insert_meta(&instance_node, file_id)
@@ -311,6 +313,8 @@ pub fn add_in(repo_root: &Path) -> Result<(), String> {
     dfs_in(repo_root, &tree.root, view.as_mut())?;
     tree.prune_unvisited();
 
+    view.post_add(&tree.root)?;
+
     tree.save(&lock.path)
         .map_err(|e| format!("failed to save {}: {}", lock.path.display(), e))?;
     fs::rename(&lock.path, &index_path)
@@ -330,11 +334,10 @@ pub fn add(_args: &Vec<String>) {
 mod tests {
     use super::*;
     use crate::core::init::init_at;
-    use crate::core::tree::Children;
+    use crate::core::tree::{Children, Tree};
     use crate::files::types::ObjectType;
-    use crate::files::utils::hash;
+    use crate::files::utils::{Hash, hash};
     use crate::tester::generate::sample::qomra;
-    use crate::views::utils::string2buf128;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -367,24 +370,22 @@ mod tests {
     }
 
     fn get_child(parent: &NodeRef, name: &str) -> Option<NodeRef> {
-        let key = string2buf128(name);
         let guard = parent.borrow();
         match &guard.children {
-            Children::Attributes(map) => map.get(&key).cloned(),
-            Children::Files(map) => map.get(&key).cloned(),
+            Children::Attributes(map) => map.get(name).cloned(),
+            Children::Files(map) => map.get(name).cloned(),
             Children::None => None,
         }
     }
 
     fn get_meta(parent: &NodeRef, filename: &str) -> Option<NodeRef> {
-        let key = bytes2buf128(filename.as_bytes());
-        parent.borrow().meta.get(&key).cloned()
+        parent.borrow().meta.get(filename).cloned()
     }
 
     fn expected_object_file(
         repo_root: &Path,
         obj_type: ObjectType,
-        digest: &blake3::Hash,
+        digest: &Hash,
     ) -> PathBuf {
         let hex = digest.to_hex();
         repo_root
@@ -562,9 +563,12 @@ mod tests {
         let inst2 = get_child(&series, "instance_002.dcm").expect("missing instance_002.dcm");
         assert!(inst1.borrow().visited && inst2.borrow().visited);
 
-        let expected_blob_hash = hash(&series_dir.join("instance_001.dcm"), None, ObjectType::Blob);
-        assert_eq!(inst1.borrow().self_hash, Some(expected_blob_hash));
-        assert!(expected_object_file(&repo.path, ObjectType::Blob, &expected_blob_hash).is_file());
+        let inst1_hash = inst1.borrow().self_hash.expect("missing inst1 hash");
+        let (obj_type, body) = crate::files::utils::read_object_bytes_in(&repo.path, &inst1_hash).unwrap();
+        assert_eq!(obj_type, ObjectType::Lfs);
+        let pointer = crate::files::lfs::LfsPointer::parse(&body).expect("parse lfs pointer");
+        assert!(crate::files::lfs::has_lfs_raw(&repo.path, &pointer.hash));
+        assert!(expected_object_file(&repo.path, ObjectType::Lfs, &inst1_hash).is_file());
     }
 
     #[test]
@@ -699,15 +703,59 @@ mod tests {
 
         let new_inst1 =
             get_child(&series, "instance_001.dcm").expect("missing modified instance_001");
-        let expected_new_inst1_hash = hash(&inst1_path, None, ObjectType::Blob);
         assert!(new_inst1.borrow().visited);
-        assert_ne!(old_inst1_hash, expected_new_inst1_hash);
-        assert_eq!(new_inst1.borrow().self_hash, Some(expected_new_inst1_hash));
+        let new_inst1_hash = new_inst1.borrow().self_hash.unwrap();
+        assert_ne!(old_inst1_hash, new_inst1_hash);
+        let (obj_type, body) = crate::files::utils::read_object_bytes_in(&repo.path, &new_inst1_hash).unwrap();
+        assert_eq!(obj_type, ObjectType::Lfs);
+        let pointer = crate::files::lfs::LfsPointer::parse(&body).expect("parse lfs pointer");
+        assert!(crate::files::lfs::has_lfs_raw(&repo.path, &pointer.hash));
 
         let new_meta = get_meta(&series, "meta.json").expect("missing modified meta.json");
         let expected_new_meta_hash = hash(&series_meta_path, None, ObjectType::Meta);
         assert!(new_meta.borrow().visited);
         assert_ne!(old_meta_hash, expected_new_meta_hash);
         assert_eq!(new_meta.borrow().self_hash, Some(expected_new_meta_hash));
+    }
+
+    #[test]
+    fn test_add_indexes_lfs_tracked_file() {
+        let repo = AddTempRepo::new("lfs_track");
+        init_at(&repo.path);
+
+        // Configure LFS tracking for *.dcm
+        fs::write(repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
+
+        qomra(&repo.path, &["data"], 1, 1, 1, 2);
+        add_in(&repo.path).expect("git-med add should succeed");
+
+        let index_path = repo.path.join(".git-med/index");
+        let tree = Tree::load(&index_path).expect("load index tree");
+
+        // Inspect an instance node
+        let root = &tree.root;
+        let data = get_child(root, "data").expect("missing data");
+        let clinic = get_child(&data, "clinic").expect("missing clinic");
+        let subject = get_child(&clinic, "subject_001").expect("missing subject");
+        let study = get_child(&subject, "study_001").expect("missing study");
+        let series = get_child(&study, "series_001").expect("missing series");
+        let inst1 = get_child(&series, "instance_001.dcm").expect("missing instance_001.dcm");
+
+        let inst1_guard = inst1.borrow();
+        let pointer_hash = inst1_guard.self_hash.expect("must have self_hash");
+
+        // Object in .git-med/objects/ must be ObjectType::Lfs
+        let (obj_type, body) = crate::files::utils::read_object_bytes_in(&repo.path, &pointer_hash).unwrap();
+        assert_eq!(obj_type, ObjectType::Lfs);
+
+        // Parse LFS pointer
+        let pointer = crate::files::lfs::LfsPointer::parse(&body).expect("must parse as LfsPointer");
+        assert_eq!(pointer.origin, "self");
+        assert_eq!(pointer.parent, "self");
+        assert_eq!(pointer.local_path, "self");
+        assert!(pointer.remote_path.contains("/lfs/"));
+
+        // Raw file must be staged in .git-med/lfs/objects/
+        assert!(crate::files::lfs::has_lfs_raw(&repo.path, &pointer.hash));
     }
 }

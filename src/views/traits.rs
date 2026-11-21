@@ -5,6 +5,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub trait View {
+    fn is_trackable(&self, _path: &Path) -> bool {
+        true
+    }
+
     fn index(&mut self, path: &Path) -> ViewAttributesIndex;
     fn view(&self, view_attributes: &ViewAttributes) -> (PathBuf, String);
 
@@ -12,43 +16,49 @@ pub trait View {
 
     fn index_task(&self, path: &Path, node: &NodeRef) -> Result<(), ()>;
 
-    fn index_source(&self, path: &Path, node: &NodeRef, task_id: &[u8; 16]) -> Result<(), ()>;
+    fn index_source(&self, path: &Path, node: &NodeRef, task_id: &str) -> Result<(), ()>;
 
     fn index_subject(
         &self,
         path: &Path,
         node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
+        task_id: &str,
+        source_id: &str,
     ) -> Result<(), ()>;
 
     fn index_study(
         &self,
         path: &Path,
         node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
+        task_id: &str,
+        source_id: &str,
+        subject_id: &str,
     ) -> Result<(), ()>;
 
     fn index_series(
         &self,
         path: &Path,
         node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
+        task_id: &str,
+        source_id: &str,
+        subject_id: &str,
+        study_id: &str,
     ) -> Result<(), ()>;
 
     fn index_instance(
         &self,
         path: &Path,
         node: &NodeRef,
-        task_id: &[u8; 16],
-        source_id: &[u8; 16],
-        subject_id: &[u8; 16],
-        study_id: &[u8; 16],
-        series_id: &[u8; 16],
+        task_id: &str,
+        source_id: &str,
+        subject_id: &str,
+        study_id: &str,
+        series_id: &str,
     ) -> Result<(), ()>;
+
+    fn write(&self, root: &NodeRef) -> Result<(), String>;
+
+    fn post_add(&self, _root: &NodeRef) -> Result<(), String> {
+        Ok(())
+    }
 }

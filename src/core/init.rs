@@ -24,7 +24,6 @@ pub(crate) fn init_at(repo_path: &Path) {
         git_med_path.join("refs/remotes/origin"),
         git_med_path.join("refs/tags"),
         git_med_path.join("objects"),
-        git_med_path.join("meta_objects"),
     ];
 
     for dir in &dirs {
@@ -35,6 +34,11 @@ pub(crate) fn init_at(repo_path: &Path) {
     fs::write(git_med_path.join("HEAD"), "ref: refs/heads/main\n")
         .expect("Failed to create HEAD file");
     fs::write(git_med_path.join("VIEW"), "QOMRA\n").expect("Failed to create VIEW file");
+    fs::write(
+        git_med_path.join("lfs_track"),
+        crate::files::lfs::DEFAULT_LFS_PATTERNS,
+    )
+    .expect("Failed to create lfs_track file");
     File::create(git_med_path.join("refs/heads/main"))
         .expect("Failed to create refs/heads/main file");
 }
