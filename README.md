@@ -1,4 +1,6 @@
 # git-med - pre-alpha 
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
 `git-med` is an experimental/evolving distributed version control system (DVCS). We use it to power Qomra Datasets. We are using this project to experiment with ideas. 
 
