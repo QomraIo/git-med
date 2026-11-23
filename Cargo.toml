@@ -3,6 +3,14 @@ name = "git-med"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "git_med"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-med"
+path = "src/main.rs"
+
 [dependencies]
 blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
 sha2 = "0.10"
