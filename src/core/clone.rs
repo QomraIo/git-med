@@ -24,10 +24,16 @@ pub fn clone_in(url: &str, target_dir: Option<&Path>) -> Result<PathBuf, String>
         return Err("repository url cannot be empty".to_string());
     }
 
+    let normalized_url = if !clean_url.contains("://") {
+        format!("https://{}", clean_url)
+    } else {
+        clean_url.to_string()
+    };
+
     let dest = if let Some(dir) = target_dir {
         dir.to_path_buf()
     } else {
-        PathBuf::from(derive_repo_name_from_url(clean_url))
+        PathBuf::from(derive_repo_name_from_url(&normalized_url))
     };
 
     if dest.join(".git-med").is_dir() {
@@ -38,7 +44,7 @@ pub fn clone_in(url: &str, target_dir: Option<&Path>) -> Result<PathBuf, String>
     }
 
     let client = GitHttpClient::new();
-    crate::core::block_on(client.clone_repo(clean_url, &dest))
+    crate::core::block_on(client.clone_repo(&normalized_url, &dest))
         .map_err(|e| format!("clone failed: {}", e))?;
 
     Ok(dest)
