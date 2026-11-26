@@ -25,12 +25,12 @@ pub fn read_view_name(view_path: &Path) -> Result<String, String> {
         Ok(content) => {
             let trimmed = content.trim().to_lowercase();
             if trimmed.is_empty() {
-                Ok("qomra".to_string())
+                Ok("smart".to_string())
             } else {
                 Ok(trimmed)
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("qomra".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("smart".to_string()),
         Err(e) => Err(format!("failed to read {}: {}", view_path.display(), e)),
     }
 }
@@ -615,7 +615,7 @@ mod tests {
     use crate::core::branch::branch_in;
     use crate::core::commit::commit_with_message_in;
     use crate::core::init::init_at;
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn test_merge_fast_forward_linear() {
         let repo = TempMergeRepo::new("ff_linear");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Commit 1").unwrap();
 
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn test_merge_already_up_to_date() {
         let repo = TempMergeRepo::new("up_to_date");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Commit 1").unwrap();
 
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn test_merge_3way_diverged_clean() {
         let repo = TempMergeRepo::new("3way_clean");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn test_merge_conflict_fails_without_breaker() {
         let repo = TempMergeRepo::new("conflict_fail");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_merge_conflict_breaker_left_and_right() {
         let repo = TempMergeRepo::new("conflict_breaker");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn test_octopus_merge_evolving_tree() {
         let repo = TempMergeRepo::new("octopus");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn test_octopus_merge_fast_forward() {
         let repo = TempMergeRepo::new("octopus_ff");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Commit 1").unwrap();
 
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn test_octopus_merge_conflict_breaker() {
         let repo = TempMergeRepo::new("octopus_conflict");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn test_merge_custom_message() {
         let repo = TempMergeRepo::new("custom_msg");
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).unwrap();
         commit_with_message_in(&repo.path, "Base commit").unwrap();
 
@@ -1005,7 +1005,7 @@ mod tests {
         let repo = TempMergeRepo::new("cli_runner");
         let cli = GitMedCli::new(&repo.path);
 
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         cli.add().unwrap();
         cli.commit("Base commit").unwrap();
 

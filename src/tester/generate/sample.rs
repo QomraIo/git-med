@@ -101,7 +101,7 @@ pub fn dicom(
     }
 }
 
-pub fn qomra(
+pub fn smart(
     root: &Path,
     tasks: &[&str],
     n_subjects: usize,

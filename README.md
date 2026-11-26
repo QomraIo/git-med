@@ -101,7 +101,7 @@ git-med add
 # 4. Commit staged dataset
 git-med commit -m "Initial medical dataset import"
 
-# 5. Switch active imaging view (qomra, dicom, brats)
+# 5. Switch active imaging view (smart, dicom, brats)
 git-med view dicom
 
 # 6. Authenticate and push to remote forge server

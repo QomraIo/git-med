@@ -3,7 +3,7 @@ title: git-med
 description: Distributed Version Control for Medical Imaging Datasets
 template: splash
 hero:
-  tagline: Distributed version control built from the ground up for biomedical imaging datasets (DICOM, BraTS, QOMRA).
+  tagline: Distributed version control built from the ground up for biomedical imaging datasets (DICOM, BraTS, SMART).
   actions:
     - text: Quickstart Guide
       link: /git-med/getting-started/
@@ -24,10 +24,10 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid stagger>
   <Card title="Medical Domain-Aware" icon="information">
-    Native support for biomedical imaging standards. Parses DICOM tags, BraTS NIfTI volumes, and QOMRA metadata directly into semantic attribute trees.
+    Native support for biomedical imaging standards. Parses DICOM tags, BraTS NIfTI volumes, and SMART metadata directly into semantic attribute trees.
   </Card>
   <Card title="Dynamic Multi-View Engine" icon="laptop">
-    Switch working directory projections seamlessly between DICOM hierarchies, BraTS folders, and QOMRA JSON layouts without duplicating raw data.
+    Switch working directory projections seamlessly between DICOM hierarchies, BraTS folders, and SMART JSON layouts without duplicating raw data.
   </Card>
   <Card title="Native Large File Storage (LFS)" icon="document">
     Automatic separation of lightweight metadata trees from multi-gigabyte binary assets using high-performance BLAKE3 content-addressed storage.

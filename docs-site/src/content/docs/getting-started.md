@@ -68,7 +68,7 @@ cd my_dataset
 ```
 
 ### 2. Generate or Add Medical Imaging Data
-Generate synthetic DICOM, BraTS, or QOMRA datasets for testing:
+Generate synthetic DICOM, BraTS, or SMART datasets for testing:
 ```bash
 git-med generate dicom ./data 2 1 3
 ```
@@ -83,7 +83,7 @@ git-med commit -m "Initial medical dataset import"
 ### 4. Switch Between Imaging Views
 Reorganize the physical layout on disk to match different clinical and machine learning standards:
 ```bash
-# Query active view (defaults to qomra)
+# Query active view (defaults to smart)
 git-med view
 
 # Transform workspace layout into DICOM SOP hierarchy

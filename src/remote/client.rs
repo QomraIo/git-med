@@ -341,7 +341,7 @@ impl GitHttpClient {
 
         let view_file = git_med.join("VIEW");
         if !view_file.exists() {
-            std::fs::write(&view_file, "QOMRA\n")?;
+            std::fs::write(&view_file, "SMART\n")?;
         }
 
         let lfs_track_file = git_med.join("lfs_track");
@@ -378,7 +378,7 @@ impl GitHttpClient {
             self.download_lfs_objects_for_tree(repo_url, target_dir, &tree.root).await?;
 
             let view_name = crate::core::view::read_view_name(&git_med.join("VIEW"))
-                .unwrap_or_else(|_| "qomra".to_string());
+                .unwrap_or_else(|_| "smart".to_string());
             let view = crate::views::get_view_in(&view_name, target_dir)
                 .ok_or_else(|| RemoteError::Protocol(format!("unsupported view '{}'", view_name)))?;
             view.write(&tree.root)
@@ -499,7 +499,7 @@ impl GitHttpClient {
         self.download_lfs_objects_for_tree(repo_url, repo_root, &tree.root).await?;
 
         let view_name = crate::core::view::read_view_name(&git_med.join("VIEW"))
-            .unwrap_or_else(|_| "qomra".to_string());
+            .unwrap_or_else(|_| "smart".to_string());
         let view = crate::views::get_view_in(&view_name, repo_root)
             .ok_or_else(|| RemoteError::Protocol(format!("unsupported view '{}'", view_name)))?;
         view.write(&tree.root)
@@ -967,7 +967,7 @@ mod tests {
     use crate::remote::packfile::create_packfile_bytes;
     use crate::remote::pkt_line::encode_str;
     use crate::remote::traversal::collect_objects_to_pack;
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1122,7 +1122,7 @@ mod tests {
         // 1. Prepare source repository with a commit and dataset
         let src = TempDirRepo::new("src_clone");
         init_at(&src.path);
-        qomra(&src.path, &["data"], 1, 1, 1, 1);
+        smart(&src.path, &["data"], 1, 1, 1, 1);
         add_in(&src.path).expect("add_in");
         let commit_hash = commit_with_message_in(&src.path, "commit 1").expect("commit");
 
@@ -1180,7 +1180,7 @@ mod tests {
         // 1. Prepare source repository with commit 1
         let src = TempDirRepo::new("src_pull");
         init_at(&src.path);
-        qomra(&src.path, &["data"], 1, 1, 1, 1);
+        smart(&src.path, &["data"], 1, 1, 1, 1);
         add_in(&src.path).expect("add_in");
         let commit1 = commit_with_message_in(&src.path, "commit 1").expect("commit 1");
 
@@ -1236,7 +1236,7 @@ mod tests {
         // 1. Prepare base repo
         let base = TempDirRepo::new("base_nff");
         init_at(&base.path);
-        qomra(&base.path, &["data"], 1, 1, 1, 1);
+        smart(&base.path, &["data"], 1, 1, 1, 1);
         add_in(&base.path).expect("add_in");
         let c_base = commit_with_message_in(&base.path, "base commit").unwrap();
 
@@ -1291,7 +1291,7 @@ mod tests {
     async fn test_push_branch_updates_remote_tracking_ref() {
         let repo = TempDirRepo::new("push_tracking");
         init_at(&repo.path);
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).expect("add_in");
         let commit_hash = commit_with_message_in(&repo.path, "push commit").unwrap();
 
@@ -1398,7 +1398,7 @@ mod tests {
         // Configure LFS tracking for *.dcm
         fs::write(repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
 
-        qomra(&repo.path, &["data"], 1, 1, 1, 1);
+        smart(&repo.path, &["data"], 1, 1, 1, 1);
         add_in(&repo.path).expect("add_in with lfs");
         let commit_hash = commit_with_message_in(&repo.path, "lfs commit").unwrap();
 
@@ -1506,7 +1506,7 @@ mod tests {
         let origin_repo = TempDirRepo::new("clone_origin");
         init_at(&origin_repo.path);
         fs::write(origin_repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
-        qomra(&origin_repo.path, &["data"], 1, 1, 1, 1);
+        smart(&origin_repo.path, &["data"], 1, 1, 1, 1);
         add_in(&origin_repo.path).expect("origin add");
         let commit_hash = commit_with_message_in(&origin_repo.path, "origin commit").unwrap();
 

@@ -6,11 +6,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Qomra {
+pub struct Smart {
     repo_root: PathBuf,
 }
 
-impl Default for Qomra {
+impl Default for Smart {
     fn default() -> Self {
         Self {
             repo_root: PathBuf::from("."),
@@ -18,7 +18,7 @@ impl Default for Qomra {
     }
 }
 
-impl Qomra {
+impl Smart {
     pub fn new(repo_root: &Path) -> Self {
         Self {
             repo_root: repo_root.to_path_buf(),
@@ -136,7 +136,7 @@ pub use crate::views::utils::{
     add_node_object_in, git_add_file, git_add_file_in, git_add_metafile, git_add_metafile_in,
 };
 
-impl View for Qomra {
+impl View for Smart {
     fn index(&mut self, path: &Path) -> ViewAttributesIndex {
         let comps: Vec<String> = path
             .components()
@@ -268,7 +268,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
     struct TestContext {
         output_dir: String,
     }
@@ -279,13 +279,13 @@ mod tests {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static COUNTER: AtomicUsize = AtomicUsize::new(0);
             let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let output_dir = format!("_tmp_views_qomra_test_{}_{}", std::process::id(), id);
+            let output_dir = format!("_tmp_views_smart_test_{}_{}", std::process::id(), id);
 
             let n_subjects = 1;
             let study_per_subjects = 1;
             let series_per_study = 1;
             let file_per_series = 1;
-            qomra(
+            smart(
                 &Path::new(&output_dir),
                 &["data"],
                 n_subjects,
@@ -319,8 +319,8 @@ mod tests {
             .join("instance_001.dcm");
         let rel_path = file_path.strip_prefix(&ctx.output_dir).unwrap();
 
-        let mut qomra = Qomra::default();
-        let indexed = qomra.index(rel_path);
+        let mut smart = Smart::default();
+        let indexed = smart.index(rel_path);
 
         assert_eq!(indexed.task.as_deref(), Some("data"));
         assert_eq!(indexed.source.as_deref(), Some("clinic"));
@@ -332,19 +332,19 @@ mod tests {
 
     #[test]
     fn test_index_shallow_and_stray_metafiles() {
-        let mut qomra = Qomra::default();
+        let mut smart = Smart::default();
 
         for root_file in ["README.md", ".gitignore", "meta.json", "./README.md"] {
-            let attrs = qomra.index(Path::new(root_file));
+            let attrs = smart.index(Path::new(root_file));
             assert!(attrs.task.is_none());
             assert!(attrs.instance.is_none());
         }
 
-        let task_meta = qomra.index(Path::new("./data/README.md"));
+        let task_meta = smart.index(Path::new("./data/README.md"));
         assert_eq!(task_meta.task.as_deref(), Some("data"));
         assert!(task_meta.source.is_none());
 
-        let series_meta = qomra.index(Path::new(
+        let series_meta = smart.index(Path::new(
             "data/clinic/subject_001/study_001/series_001/meta.json",
         ));
         assert_eq!(series_meta.task.as_deref(), Some("data"));
@@ -361,7 +361,7 @@ mod tests {
     fn test_view() {
         let _ctx = TestContext::setup();
 
-        let qomra = Qomra::default();
+        let smart = Smart::default();
 
         let view_attributes = ViewAttributes {
             subject: "subject_001",
@@ -372,7 +372,7 @@ mod tests {
             task: "data",
         };
 
-        let (path, content) = qomra.view(&view_attributes);
+        let (path, content) = smart.view(&view_attributes);
 
         let expected_path = PathBuf::new()
             .join("data")
@@ -387,13 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn test_qomra_write_root_meta_and_tree_hierarchy() {
+    fn test_smart_write_root_meta_and_tree_hierarchy() {
         use crate::core::tree::{ChildrenType, Node};
         use crate::files::commit::save_tree_in;
         use crate::files::utils::make_object_from_bytes_in;
 
         let temp_dir = std::env::temp_dir().join(format!(
-            "git_med_qomra_write_test_{}_{}",
+            "git_med_smart_write_test_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -403,7 +403,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join(".git-med/objects")).unwrap();
 
-        let qomra = Qomra::new(&temp_dir);
+        let smart = Smart::new(&temp_dir);
 
         // 1. Root node
         let root = Node::new("", ChildrenType::Attributes);
@@ -498,7 +498,7 @@ mod tests {
         save_tree_in(Rc::clone(&root), &temp_dir).unwrap();
 
         // Execute view.write(&root)
-        qomra.write(&root).expect("qomra write must succeed");
+        smart.write(&root).expect("smart write must succeed");
 
         // Verify root metadata file exists in root
         let root_meta_path = temp_dir.join("meta.json");

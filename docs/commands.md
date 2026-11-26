@@ -13,7 +13,7 @@ Comprehensive reference and guide to all commands available in the `git-med` CLI
 | **Workspace & Staging** | [commit](file:///root/git-med/docs/commands/commit.md) | `git-med commit -m "<message>"` | Record staged metadata tree into a new commit |
 | **Branching & Merging** | [branch](file:///root/git-med/docs/commands/branch.md) | `git-med branch <branch_name>` | Create and switch to a branch reference |
 | **Branching & Merging** | [merge](file:///root/git-med/docs/commands/merge.md) | `git-med merge <branch>... [--left\|--right]` | Merge branches with automated conflict tie-breakers |
-| **Medical Formats & Views** | [view](file:///root/git-med/docs/commands/view.md) | `git-med view <qomra\|dicom\|brats>` | Display or transform workspace between medical imaging formats |
+| **Medical Formats & Views** | [view](file:///root/git-med/docs/commands/view.md) | `git-med view <smart\|dicom\|brats>` | Display or transform workspace between medical imaging formats |
 | **Cohort Composition** | [mix](file:///root/git-med/docs/commands/mix.md) | `git-med mix <result_branch> <spec1> <spec2>...` | Synthesize cohorts across multiple branches/repos with zero-copy linking |
 | **Remote Collaboration** | [remote](file:///root/git-med/docs/commands/remote.md) | `git-med remote add <name> <url>` | Manage remote repository URLs in configuration |
 | **Remote Collaboration** | [clone](file:///root/git-med/docs/commands/clone.md) | `git-med clone <url> [destination]` | Clone remote repository and hydrate medical LFS assets |
@@ -33,7 +33,7 @@ Comprehensive reference and guide to all commands available in the `git-med` CLI
 3. [commit](file:///root/git-med/docs/commands/commit.md) - Commit creation and history recording
 4. [branch](file:///root/git-med/docs/commands/branch.md) - Branch creation and checkout
 5. [remote](file:///root/git-med/docs/commands/remote.md) - Remote server management
-6. [view](file:///root/git-med/docs/commands/view.md) - Medical format layout switching (QOMRA, DICOM, BraTS)
+6. [view](file:///root/git-med/docs/commands/view.md) - Medical format layout switching (SMART, DICOM, BraTS)
 7. [clone](file:///root/git-med/docs/commands/clone.md) - Remote cloning with LFS asset hydration
 8. [push](file:///root/git-med/docs/commands/push.md) - Remote metadata and LFS payload synchronization
 9. [pull](file:///root/git-med/docs/commands/pull.md) - Fast-forward update and asset retrieval

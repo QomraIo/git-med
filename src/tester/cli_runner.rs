@@ -155,9 +155,9 @@ impl GitMedCli {
                 &series_per_study.to_string(),
                 &file_per_series.to_string(),
             ]),
-            "qomra" => self.run_cmd(&[
+            "smart" => self.run_cmd(&[
                 "generate",
-                "qomra",
+                "smart",
                 output_dir,
                 &n_subjects.to_string(),
                 &study_per_subjects.to_string(),

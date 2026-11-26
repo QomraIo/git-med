@@ -1,10 +1,10 @@
 # git-med view
 
 ## How to use
-`git-med view <qomra|dicom|brats>`
+`git-med view <smart|dicom|brats>`
 
 ## What
-Displays the active dataset projection view or transforms the working directory file layout between medical imaging representations (such as QOMRA JSON, DICOM series, or BraTS NIfTI) without modifying underlying raw data.
+Displays the active dataset projection view or transforms the working directory file layout between medical imaging representations (such as SMART JSON, DICOM series, or BraTS NIfTI) without modifying underlying raw data.
 
 ## Git similarity
 | Aspect | git-med | Git | Key Differences |

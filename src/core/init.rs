@@ -33,7 +33,7 @@ pub(crate) fn init_at(repo_path: &Path) {
     File::create(git_med_path.join("index")).expect("Failed to create index file");
     fs::write(git_med_path.join("HEAD"), "ref: refs/heads/main\n")
         .expect("Failed to create HEAD file");
-    fs::write(git_med_path.join("VIEW"), "QOMRA\n").expect("Failed to create VIEW file");
+    fs::write(git_med_path.join("VIEW"), "SMART\n").expect("Failed to create VIEW file");
     fs::write(
         git_med_path.join("lfs_track"),
         crate::files::lfs::DEFAULT_LFS_PATTERNS,

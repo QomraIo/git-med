@@ -1,6 +1,6 @@
 pub mod brats;
 pub mod dicom;
-pub mod qomra;
+pub mod smart;
 pub mod traits;
 pub mod types;
 pub mod utils;
@@ -11,7 +11,7 @@ use crate::files::types::FileMetadata;
 use crate::files::utils::get_file_metadata;
 use crate::views::brats::Brats;
 use crate::views::dicom::Dicom;
-use crate::views::qomra::Qomra;
+use crate::views::smart::Smart;
 use crate::views::traits::View;
 
 pub fn get_view(view: &str) -> Option<Box<dyn View>> {
@@ -23,7 +23,7 @@ pub fn get_view_in(view: &str, repo_root: &Path) -> Option<Box<dyn View>> {
     match view {
         "brats" => Some(Box::new(Brats::new(repo_root))),
         "dicom" => Some(Box::new(Dicom::new(repo_root))),
-        "qomra" => Some(Box::new(Qomra::new(repo_root))),
+        "smart" => Some(Box::new(Smart::new(repo_root))),
         _ => None,
     }
 }
@@ -315,7 +315,7 @@ mod tests {
             n.visited = false;
         }
 
-        let view = Qomra::new(&temp_dir);
+        let view = Smart::new(&temp_dir);
         index_root_in(&view, &temp_dir, Path::new("sample.bin"), &node).unwrap();
         assert!(node.borrow().visited);
 

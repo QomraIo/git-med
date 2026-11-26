@@ -71,27 +71,27 @@ fn find_first_data_file(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Verify files materialized under Qomra layout: `<task>/<source>/<subject>/<study>/<series>/<instance>`.
-fn verify_qomra_files(repo_root: &Path) -> Result<usize, String> {
+/// Verify files materialized under Smart layout: `<task>/<source>/<subject>/<study>/<series>/<instance>`.
+fn verify_smart_files(repo_root: &Path) -> Result<usize, String> {
     let mut count = 0;
     for task_name in ["data", "segmentation", "localisation"] {
         let task_dir = repo_root.join(task_name);
         if task_dir.is_dir() {
-            collect_qomra_instances(&task_dir, 1, &mut count);
+            collect_smart_instances(&task_dir, 1, &mut count);
         }
     }
     if count == 0 {
-        return Err("no valid Qomra instances found in expected hierarchy".to_string());
+        return Err("no valid Smart instances found in expected hierarchy".to_string());
     }
     Ok(count)
 }
 
-fn collect_qomra_instances(dir: &Path, depth: usize, count: &mut usize) {
+fn collect_smart_instances(dir: &Path, depth: usize, count: &mut usize) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                collect_qomra_instances(&path, depth + 1, count);
+                collect_smart_instances(&path, depth + 1, count);
             } else if depth >= 5 {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.starts_with(".view.")
@@ -184,7 +184,7 @@ fn scan_brats_rec(dir: &Path, count: &mut usize) {
 /// Verify that files on disk conform to the target view's directory structure and sidecars.
 fn verify_view_layout(dir: &Path, view: &str) -> Result<usize, String> {
     match view {
-        "qomra" => verify_qomra_files(dir),
+        "smart" => verify_smart_files(dir),
         "dicom" => verify_dicom_files(dir),
         "brats" => verify_brats_files(dir),
         _ => Err(format!("unknown view: {}", view)),
@@ -233,7 +233,7 @@ fn scan_for_instance_rec(dir: &Path, view: &str, target_name: &str, found: &mut 
                                 }
                             }
                         }
-                        "qomra" => {
+                        "smart" => {
                             let path_str = path.to_string_lossy();
                             if path_str.contains("data") || path_str.contains("segmentation") {
                                 *found = true;
@@ -290,16 +290,16 @@ fn create_new_instance_in_view(repo_root: &Path, view: &str, instance_name: &str
             fs::write(&sidecar_file, "clinic\ndata\n").expect("write new dicom sidecar");
             inst_file
         }
-        "qomra" => {
+        "smart" => {
             let series_dir = repo_root
                 .join("data")
                 .join("clinic")
                 .join("subject_001")
                 .join("study_001")
                 .join("series_001");
-            fs::create_dir_all(&series_dir).expect("create qomra series dir");
+            fs::create_dir_all(&series_dir).expect("create smart series dir");
             let inst_file = series_dir.join(format!("{}.nii.gz", instance_name));
-            fs::write(&inst_file, BRATS_SAMPLE).expect("write new qomra instance");
+            fs::write(&inst_file, BRATS_SAMPLE).expect("write new smart instance");
             inst_file
         }
         _ => panic!("unsupported view {}", view),
@@ -317,7 +317,7 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
 
     // 1. Initialize repository
     cli.init(".").expect("git-med init failed");
-    if v1 != "qomra" {
+    if v1 != "smart" {
         cli.view(Some(v1)).expect("switch initial view failed");
     }
     assert_eq!(cli.read_current_view().expect("read VIEW"), v1);
@@ -327,11 +327,11 @@ pub fn run_e2e_workflow(v1: &str, v2: &str, v3: &str) {
     cli.generate_for_view(v1, ".", 1, 1, 1, 2)
         .expect("git-med generate failed");
 
-    // For Qomra, also add a metadata file to exercise metafile indexing and object verification
-    if v1 == "qomra" {
+    // For Smart, also add a metadata file to exercise metafile indexing and object verification
+    if v1 == "smart" {
         let meta_path = repo_temp.path.join("data/clinic/meta.clinic.json");
         fs::write(&meta_path, r#"{"dept":"radiology","test":"e2e"}"#)
-            .expect("write qomra clinic meta");
+            .expect("write smart clinic meta");
     }
 
     cli.add().expect("git-med add failed");
@@ -545,18 +545,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_e2e_qomra_dicom_brats_qomra() {
-        run_e2e_workflow("qomra", "dicom", "brats");
+    fn test_e2e_smart_dicom_brats_smart() {
+        run_e2e_workflow("smart", "dicom", "brats");
     }
 
     #[test]
-    fn test_e2e_brats_qomra_dicom_brats() {
-        run_e2e_workflow("brats", "qomra", "dicom");
+    fn test_e2e_brats_smart_dicom_brats() {
+        run_e2e_workflow("brats", "smart", "dicom");
     }
 
     #[test]
-    fn test_e2e_dicom_brats_qomra_dicom() {
-        run_e2e_workflow("dicom", "brats", "qomra");
+    fn test_e2e_dicom_brats_smart_dicom() {
+        run_e2e_workflow("dicom", "brats", "smart");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -572,7 +572,7 @@ mod tests {
         let cli_src = GitMedCli::new(&src_repo.path);
 
         // Generate data in src
-        crate::tester::generate::sample::qomra(&src_repo.path, &["data"], 1, 1, 1, 1);
+        crate::tester::generate::sample::smart(&src_repo.path, &["data"], 1, 1, 1, 1);
         cli_src.add().expect("add");
         cli_src.commit("commit 1").expect("commit");
 

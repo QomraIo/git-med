@@ -1,12 +1,12 @@
 pub mod sample;
 
-use sample::{brats, dicom, qomra};
+use sample::{brats, dicom, smart};
 use std::path::Path;
 
 pub fn generate(args: &[String]) {
     if args.len() < 4 {
         println!(
-            "Usage: git-med generate <brats|dicom|qomra|all> <output_dir> [n_subjects] [study_per_subjects] [file_per_study/series]"
+            "Usage: git-med generate <brats|dicom|smart|all> <output_dir> [n_subjects] [study_per_subjects] [file_per_study/series]"
         );
         return;
     }
@@ -48,7 +48,7 @@ pub fn generate(args: &[String]) {
                 output_dir, n_subjects, study_per_subjects, series_per_study, file_per_series
             );
         }
-        "qomra" => {
+        "smart" => {
             let n_subjects = parse_arg(4, 1);
             let study_per_subjects = parse_arg(5, 1);
             let series_per_study = parse_arg(6, 1);
@@ -59,7 +59,7 @@ pub fn generate(args: &[String]) {
                 vec![]
             };
             let tasks_ref: Vec<&str> = tasks.iter().map(|s| s.as_str()).collect();
-            qomra(
+            smart(
                 output_dir,
                 &tasks_ref,
                 n_subjects,
@@ -68,7 +68,7 @@ pub fn generate(args: &[String]) {
                 file_per_series,
             );
             println!(
-                "Generated Qomra sample dataset in {:?} (tasks: data [clinic, raw], segmentation [consensus, model_v1]; subjects: {}, studies: {}, series: {}, files: {})",
+                "Generated Smart sample dataset in {:?} (tasks: data [clinic, raw], segmentation [consensus, model_v1]; subjects: {}, studies: {}, series: {}, files: {})",
                 output_dir, n_subjects, study_per_subjects, series_per_study, file_per_series
             );
         }
@@ -81,7 +81,7 @@ pub fn generate(args: &[String]) {
 
             let brats_dir = output_dir.join("brats");
             let dicom_dir = output_dir.join("dicom");
-            let qomra_dir = output_dir.join("qomra");
+            let smart_dir = output_dir.join("smart");
 
             let brats_study = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
             brats(&brats_dir, n_subjects, brats_study, file_per_study);
@@ -92,8 +92,8 @@ pub fn generate(args: &[String]) {
                 series_per_study,
                 file_per_series,
             );
-            qomra(
-                &qomra_dir,
+            smart(
+                &smart_dir,
                 &[],
                 n_subjects,
                 study_per_subjects,
@@ -101,12 +101,12 @@ pub fn generate(args: &[String]) {
                 file_per_series,
             );
             println!(
-                "Generated all sample datasets (brats, dicom, qomra) in {:?}",
+                "Generated all sample datasets (brats, dicom, smart) in {:?}",
                 output_dir
             );
         }
         _ => println!(
-            "Unknown generate type: {}. Available: brats, dicom, qomra, all",
+            "Unknown generate type: {}. Available: brats, dicom, smart, all",
             target_type
         ),
     }

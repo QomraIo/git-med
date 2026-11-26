@@ -482,14 +482,14 @@ mod tests {
     }
 
     #[test]
-    fn test_qomra_e2e_workflow_generate_add_commit_delete_add_commit() {
+    fn test_smart_e2e_workflow_generate_add_commit_delete_add_commit() {
         use crate::core::add::add_in;
-        use crate::tester::generate::sample::qomra;
+        use crate::tester::generate::sample::smart;
 
-        let repo = TempRepo::new("qomra_e2e");
+        let repo = TempRepo::new("smart_e2e");
 
-        // 1. Generate Qomra dataset with tester
-        qomra(&repo.path, &[], 1, 1, 1, 1);
+        // 1. Generate Smart dataset with tester
+        smart(&repo.path, &[], 1, 1, 1, 1);
 
         let target_file = repo.path.join(
             "segmentation/model_v1/subject_001/study_001/series_001/instance_001_seg.nii.gz",
@@ -500,7 +500,7 @@ mod tests {
         add_in(&repo.path).expect("first add_in should succeed");
 
         // 3. Commit initial state
-        let commit_1 = commit_with_message_in(&repo.path, "feat: initial qomra commit")
+        let commit_1 = commit_with_message_in(&repo.path, "feat: initial smart commit")
             .expect("first commit should succeed");
         let hex_1 = commit_1.to_hex();
         assert_eq!(load_head_hash_in(&repo.path).unwrap(), Some(hex_1.to_string()));

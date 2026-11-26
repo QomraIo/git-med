@@ -447,7 +447,7 @@ mod tests {
     use crate::core::branch::branch_in;
     use crate::core::commit::commit_with_message_in;
     use crate::core::init::init_at;
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
 
     struct TempMixRepo {
         pub path: PathBuf,
@@ -540,7 +540,7 @@ mod tests {
         let repo_external = TempMixRepo::new("mix_ext");
 
         // Set up repo_main: self::main with dataset A
-        qomra(&repo_main.path, &["data/task_a"], 1, 1, 1, 1);
+        smart(&repo_main.path, &["data/task_a"], 1, 1, 1, 1);
         add_in(&repo_main.path).unwrap();
         commit_with_message_in(&repo_main.path, "Commit Main Dataset A").unwrap();
 
@@ -554,7 +554,7 @@ mod tests {
         branch_in(&repo_main.path, "main").unwrap();
 
         // Set up repo_external: branch feat_ext with dataset B
-        qomra(&repo_external.path, &["data/task_b"], 1, 1, 1, 1);
+        smart(&repo_external.path, &["data/task_b"], 1, 1, 1, 1);
         fs::write(repo_external.path.join("data/external_unique.txt"), b"from external repo").unwrap();
         add_in(&repo_external.path).unwrap();
         commit_with_message_in(&repo_external.path, "Commit Ext Base").unwrap();

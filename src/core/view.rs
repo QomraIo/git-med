@@ -5,18 +5,18 @@ use crate::core::tree::load_or_init_tree;
 use crate::views::get_view_in;
 
 /// Read and normalize the view name from `view_path`.
-/// Returns `"qomra"` by default if the file is missing or empty.
+/// Returns `"smart"` by default if the file is missing or empty.
 pub fn read_view_name(view_path: &Path) -> Result<String, String> {
     match fs::read_to_string(view_path) {
         Ok(content) => {
             let trimmed = content.trim().to_ascii_lowercase();
             if trimmed.is_empty() {
-                Ok("qomra".to_string())
+                Ok("smart".to_string())
             } else {
                 Ok(trimmed)
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("qomra".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("smart".to_string()),
         Err(e) => Err(format!("failed to read {}: {}", view_path.display(), e)),
     }
 }
@@ -46,9 +46,9 @@ pub fn view_in(repo_root: &Path, target_view: Option<&str>) -> Result<String, St
         }
         Some(raw_target) => {
             let target = raw_target.trim().to_ascii_lowercase();
-            if !matches!(target.as_str(), "qomra" | "dicom" | "brats") {
+            if !matches!(target.as_str(), "smart" | "dicom" | "brats") {
                 return Err(format!(
-                    "unsupported view '{}'. Valid options are: qomra, dicom, brats",
+                    "unsupported view '{}'. Valid options are: smart, dicom, brats",
                     raw_target
                 ));
             }
@@ -135,7 +135,7 @@ mod tests {
         init_at(&repo.path);
 
         let result = view_in(&repo.path, None).unwrap();
-        assert_eq!(result, "Current view: qomra");
+        assert_eq!(result, "Current view: smart");
     }
 
     #[test]
@@ -236,12 +236,12 @@ mod tests {
         search_dcm(&repo.path, &mut found_dcm);
         assert!(found_dcm, "Expected reconstructed .dcm file to exist");
 
-        // Switch to Qomra
-        let res_qomra = view_in(&repo.path, Some("qomra")).expect("switch to qomra failed");
-        assert_eq!(res_qomra, "Switched view to 'qomra'");
+        // Switch to Smart
+        let res_smart = view_in(&repo.path, Some("smart")).expect("switch to smart failed");
+        assert_eq!(res_smart, "Switched view to 'smart'");
         assert_eq!(
             read_view_name(&repo.path.join(".git-med/VIEW")).unwrap(),
-            "qomra"
+            "smart"
         );
     }
 }

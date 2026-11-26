@@ -1,6 +1,6 @@
 use crate::core::tree::load_or_init_tree;
 use crate::core::tree::{ChildrenType, NodeRef, get_or_insert_child, get_or_insert_meta};
-use crate::views::qomra::is_metafile;
+use crate::views::smart::is_metafile;
 use crate::views::traits::View;
 use crate::views::{self, get_view_in};
 use regex::Regex;
@@ -283,12 +283,12 @@ fn read_view_name(view_path: &Path) -> Result<String, String> {
         Ok(content) => {
             let trimmed = content.trim().to_ascii_lowercase();
             if trimmed.is_empty() {
-                Ok("qomra".to_string())
+                Ok("smart".to_string())
             } else {
                 Ok(trimmed)
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("qomra".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("smart".to_string()),
         Err(e) => Err(format!("failed to read {}: {}", view_path.display(), e)),
     }
 }
@@ -337,7 +337,7 @@ mod tests {
     use crate::core::tree::{Children, Tree};
     use crate::files::types::ObjectType;
     use crate::files::utils::{Hash, hash};
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -447,16 +447,16 @@ mod tests {
     }
 
     #[test]
-    fn test_add_indexes_qomra_tree_metafiles_and_skip_rules() {
-        let repo = AddTempRepo::new("qomra_full");
+    fn test_add_indexes_smart_tree_metafiles_and_skip_rules() {
+        let repo = AddTempRepo::new("smart_full");
         init_at(&repo.path);
 
         assert_eq!(
             fs::read_to_string(repo.path.join(".git-med/VIEW")).expect("read VIEW"),
-            "QOMRA\n"
+            "SMART\n"
         );
 
-        qomra(&repo.path, &["data"], 1, 1, 1, 2);
+        smart(&repo.path, &["data"], 1, 1, 1, 2);
 
         let series_dir = repo
             .path
@@ -575,7 +575,7 @@ mod tests {
     fn test_add_incremental_update_and_prune_deleted_files() {
         let repo = AddTempRepo::new("incremental");
         init_at(&repo.path);
-        qomra(&repo.path, &["data"], 1, 1, 1, 2);
+        smart(&repo.path, &["data"], 1, 1, 1, 2);
 
         let series_dir = repo
             .path
@@ -726,7 +726,7 @@ mod tests {
         // Configure LFS tracking for *.dcm
         fs::write(repo.path.join(".git-med/lfs_track"), "*.dcm\n").unwrap();
 
-        qomra(&repo.path, &["data"], 1, 1, 1, 2);
+        smart(&repo.path, &["data"], 1, 1, 1, 2);
         add_in(&repo.path).expect("git-med add should succeed");
 
         let index_path = repo.path.join(".git-med/index");

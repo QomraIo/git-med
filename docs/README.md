@@ -21,7 +21,7 @@ Welcome to the documentation for `git-med`, a specialized distributed version co
 | [`commit`](file:///root/git-med/docs/commands/commit.md) | `git-med commit -m "<message>"` | Commit staged tree to history |
 | [`branch`](file:///root/git-med/docs/commands/branch.md) | `git-med branch <branch_name>` | Create and switch to a branch |
 | [`remote`](file:///root/git-med/docs/commands/remote.md) | `git-med remote add <name> <url>` | Configure remote endpoints |
-| [`view`](file:///root/git-med/docs/commands/view.md) | `git-med view <qomra\|dicom\|brats>` | Query or transform dataset format |
+| [`view`](file:///root/git-med/docs/commands/view.md) | `git-med view <smart\|dicom\|brats>` | Query or transform dataset format |
 | [`clone`](file:///root/git-med/docs/commands/clone.md) | `git-med clone <url> [destination]` | Clone remote repository and assets |
 | [`push`](file:///root/git-med/docs/commands/push.md) | `git-med push [remote] [branch]` | Upload commits and LFS payloads |
 | [`pull`](file:///root/git-med/docs/commands/pull.md) | `git-med pull [remote] [branch]` | Fetch changes and fast-forward |

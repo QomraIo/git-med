@@ -48,12 +48,12 @@ fn read_view_name(view_path: &Path) -> Result<String, String> {
         Ok(content) => {
             let trimmed = content.trim().to_lowercase();
             if trimmed.is_empty() {
-                Ok("qomra".to_string())
+                Ok("smart".to_string())
             } else {
                 Ok(trimmed)
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("qomra".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("smart".to_string()),
         Err(e) => Err(format!("failed to read {}: {}", view_path.display(), e)),
     }
 }
@@ -174,7 +174,7 @@ mod tests {
     use crate::core::add::add_in;
     use crate::core::commit::commit_with_message_in;
     use crate::core::init::init_at;
-    use crate::tester::generate::sample::qomra;
+    use crate::tester::generate::sample::smart;
     use std::path::PathBuf;
 
     struct TempRepo {
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(missing, None);
 
         // Commit on main
-        qomra(&repo.path, &[], 1, 1, 1, 1);
+        smart(&repo.path, &[], 1, 1, 1, 1);
         add_in(&repo.path).expect("add");
         let commit_hash = commit_with_message_in(&repo.path, "initial commit").expect("commit");
 
@@ -236,7 +236,7 @@ mod tests {
         let repo = TempRepo::new("branch_new");
 
         // Commit on main
-        qomra(&repo.path, &[], 1, 1, 1, 1);
+        smart(&repo.path, &[], 1, 1, 1, 1);
         add_in(&repo.path).expect("add");
         let commit_1 = commit_with_message_in(&repo.path, "initial commit").expect("commit");
 
@@ -268,7 +268,7 @@ mod tests {
         let repo = TempRepo::new("switch_existing");
 
         // Commit 1 on main
-        qomra(&repo.path, &[], 1, 1, 1, 1);
+        smart(&repo.path, &[], 1, 1, 1, 1);
         add_in(&repo.path).expect("add");
         let commit_1 = commit_with_message_in(&repo.path, "commit 1").expect("commit 1");
         let tree_1_hash = commit_1_tree_hash(&repo.path, &commit_1);
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_load_tree_from_commit_helper() {
         let repo = TempRepo::new("load_tree_helper");
-        qomra(&repo.path, &[], 1, 1, 1, 1);
+        smart(&repo.path, &[], 1, 1, 1, 1);
         add_in(&repo.path).expect("add");
         let commit_hash = commit_with_message_in(&repo.path, "commit for helper test").unwrap();
 
