@@ -201,6 +201,76 @@ pub fn remote_add_in(repo_root: &Path, name: &str, url: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Default forge server URL used when creating a remote repo without an explicit URL/origin.
+pub const DEFAULT_REMOTE_SERVER: &str = "http://localhost:8080";
+
+/// Parse `<url_or_repo_name>` and an optional `--server <url>` into `(server_origin, repo_spec)`.
+pub fn parse_remote_create_target(
+    target: &str,
+    server_override: Option<&str>,
+) -> Result<(String, String), String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("repository URL or name cannot be empty".to_string());
+    }
+
+    if trimmed.contains("://") {
+        let server_origin = crate::core::auth::extract_server_origin(trimmed);
+        let rest = trimmed
+            .strip_prefix(&server_origin)
+            .unwrap_or("")
+            .trim_matches('/');
+        let clean_repo = rest.strip_suffix(".git").unwrap_or(rest).trim_matches('/');
+        if clean_repo.is_empty() {
+            return Err(format!(
+                "missing repository path in URL '{}'",
+                trimmed
+            ));
+        }
+        return Ok((server_origin, clean_repo.to_string()));
+    }
+
+    let clean_repo = trimmed
+        .trim_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(trimmed.trim_matches('/'))
+        .trim_matches('/');
+
+    if clean_repo.is_empty() {
+        return Err("repository name cannot be empty".to_string());
+    }
+
+    let server_origin = server_override
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(crate::core::auth::extract_server_origin)
+        .unwrap_or_else(|| DEFAULT_REMOTE_SERVER.to_string());
+
+    Ok((server_origin, clean_repo.to_string()))
+}
+
+/// Create/initialize a repository on a remote `git-med-forge` server (`POST /create_repo`).
+pub fn remote_create(
+    target: &str,
+    server_override: Option<&str>,
+    visibility: &str,
+    description: Option<&str>,
+    view: Option<&str>,
+) -> Result<crate::remote::CreateRemoteRepoResult, String> {
+    let vis = visibility.trim().to_lowercase();
+    if !matches!(vis.as_str(), "public" | "protected" | "private") {
+        return Err(format!(
+            "invalid visibility '{}': expected 'public', 'protected', or 'private'",
+            visibility
+        ));
+    }
+
+    let (server_origin, repo_name) = parse_remote_create_target(target, server_override)?;
+    let client = crate::remote::GitHttpClient::for_url(&server_origin);
+    crate::core::block_on(client.create_repo(&server_origin, &repo_name, &vis, description, view))
+        .map_err(|e| e.to_string())
+}
+
 /// CLI handler for `git-med remote`.
 pub fn remote(args: &[String]) {
     if args.len() == 2 {
@@ -243,6 +313,97 @@ pub fn remote(args: &[String]) {
             if let Err(err) = remote_add_in(Path::new("."), name, url) {
                 eprintln!("git-med remote add failed: {}", err);
                 std::process::exit(1);
+            }
+        }
+        "create" => {
+            let mut target: Option<String> = None;
+            let mut server: Option<String> = None;
+            let mut visibility = "public".to_string();
+            let mut description: Option<String> = None;
+            let mut view: Option<String> = None;
+
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--server" | "-s" if i + 1 < args.len() => {
+                        server = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--visibility" | "-v" if i + 1 < args.len() => {
+                        visibility = args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--description" | "-d" if i + 1 < args.len() => {
+                        description = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "--view" if i + 1 < args.len() => {
+                        view = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    other if other.starts_with("--server=") => {
+                        server = Some(other.strip_prefix("--server=").unwrap().to_string());
+                        i += 1;
+                    }
+                    other if other.starts_with("--visibility=") => {
+                        visibility = other.strip_prefix("--visibility=").unwrap().to_string();
+                        i += 1;
+                    }
+                    other if other.starts_with("--description=") => {
+                        description = Some(other.strip_prefix("--description=").unwrap().to_string());
+                        i += 1;
+                    }
+                    other if other.starts_with("--view=") => {
+                        view = Some(other.strip_prefix("--view=").unwrap().to_string());
+                        i += 1;
+                    }
+                    other if !other.starts_with('-') && target.is_none() => {
+                        target = Some(other.to_string());
+                        i += 1;
+                    }
+                    other => {
+                        eprintln!("git-med remote create failed: unknown option '{}'", other);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            let target_val = match target {
+                Some(t) => t,
+                None => {
+                    eprintln!(
+                        "Usage: git-med remote create <repo_url_or_name> [--server <url>] [--visibility <public|protected|private>] [--description <text>]"
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            let (origin, _) = match parse_remote_create_target(&target_val, server.as_deref()) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("git-med remote create failed: {}", err);
+                    std::process::exit(1);
+                }
+            };
+
+            match remote_create(
+                &target_val,
+                server.as_deref(),
+                &visibility,
+                description.as_deref(),
+                view.as_deref(),
+            ) {
+                Ok(res) => {
+                    println!(
+                        "Created remote repository '{}' ({}) at {}",
+                        res.full_spec, res.visibility, origin
+                    );
+                    println!("Remote URL: {}{}", origin, res.clone_url);
+                }
+                Err(err) => {
+                    eprintln!("git-med remote create failed: {}", err);
+                    std::process::exit(1);
+                }
             }
         }
         other => {
@@ -395,5 +556,28 @@ mod tests {
         let content = fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("[core]\n\tbare = false\n"));
         assert!(content.contains("[remote \"origin\"]"));
+    }
+
+    #[test]
+    fn test_parse_remote_create_target_variants() {
+        let (srv, repo) =
+            parse_remote_create_target("http://localhost:8080/alice/my_dataset.git", None)
+                .expect("full URL with .git should parse");
+        assert_eq!(srv, "http://localhost:8080");
+        assert_eq!(repo, "alice/my_dataset");
+
+        let (srv2, repo2) =
+            parse_remote_create_target("my_dataset", Some("http://localhost:8080/"))
+                .expect("short name with server override should parse");
+        assert_eq!(srv2, "http://localhost:8080");
+        assert_eq!(repo2, "my_dataset");
+
+        let (srv3, repo3) =
+            parse_remote_create_target("alice/my_dataset", None).expect("default server should apply");
+        assert_eq!(srv3, "http://localhost:8080");
+        assert_eq!(repo3, "alice/my_dataset");
+
+        assert!(parse_remote_create_target("http://localhost:8080/", None).is_err());
+        assert!(parse_remote_create_target("", None).is_err());
     }
 }

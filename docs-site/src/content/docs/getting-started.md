@@ -59,6 +59,51 @@ cargo install --path .
 
 ---
 
+## Setting Up & Running the Server (`git-med-forge`)
+
+Remote commands (`login`, `remote create`, `push`, `pull`, `clone`) talk to a running [`git-med-forge`](https://github.com/QomraIo/git-med-forge) server. Run it on port `8080` (so Next.js/Fabric can use `3000` alongside it).
+
+### Option A: Docker (Fastest for Local Testing)
+```bash
+docker pull ghcr.io/qomraio/git-med-forge:latest
+
+# In-memory database + standalone auth fallback on port 8080
+docker run -d -p 8080:8080 \
+  -e GIT_MED_FORGE_PORT=8080 \
+  -e GIT_MED_FORGE_MEMORY_DB=true \
+  -e GIT_MED_FORGE_AUTH0_ENABLED=false \
+  -v $(pwd)/forge-repos:/data/repositories \
+  -e GIT_MED_FORGE_DATA_DIR=/data/repositories \
+  --name git-med-forge \
+  ghcr.io/qomraio/git-med-forge:latest
+```
+
+### Option B: Build and Run from Source
+Prerequisites: Rust `1.85+`, `pkg-config`, and `libssl-dev` (on Linux).
+
+```bash
+git clone https://github.com/QomraIo/git-med-forge.git
+cd git-med-forge
+cargo build --release
+
+# Local development (in-memory DB, standalone auth, local disk repos on port 8080)
+./target/release/git-med-forge \
+  --port 8080 \
+  --use-memory-db true \
+  --auth0-enabled false \
+  --data-dir ./data/repositories
+```
+
+For production/persistent storage, configure `.env` with `GIT_MED_FORGE_PORT=8080`, `DSQL_CLUSTER_ENDPOINT`, `S3_BUCKET_NAME`, `AWS_REGION`, `AUTH0_DOMAIN`, and `AUTH0_CLIENT_ID`, then start `./target/release/git-med-forge`.
+
+### Verify Server Health
+```bash
+curl http://localhost:8080/health
+# git-med-forge ok
+```
+
+---
+
 ## Basic Workflow & Run Commands
 
 ### 1. Initialize a Medical Repository
@@ -68,9 +113,9 @@ cd my_dataset
 ```
 
 ### 2. Generate or Add Medical Imaging Data
-Generate synthetic DICOM, BraTS, or SMART datasets for testing:
+Generate synthetic DICOM, BraTS, or SMART datasets directly into the current repository directory for testing:
 ```bash
-git-med generate dicom ./data 2 1 3
+git-med generate dicom . 2 1 3
 ```
 
 ### 3. Stage and Commit
@@ -98,11 +143,14 @@ git-med view brats
 # Create and check out a feature branch
 git-med branch feature-cohort
 
-# Configure remote forge server
-git-med remote add origin http://localhost:3000/alice/my_dataset.git
-
 # Authenticate with git-med-forge
-git-med login --server http://localhost:3000 --username alice --password secret
+git-med login --server http://localhost:8080 --username alice --password secret
+
+# Initialize the repository on the remote server
+git-med remote create http://localhost:8080/alice/my_dataset.git
+
+# Configure remote forge server
+git-med remote add origin http://localhost:8080/alice/my_dataset.git
 
 # Push dataset metadata and binary objects to server
 git-med push origin main

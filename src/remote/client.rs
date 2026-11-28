@@ -12,6 +12,18 @@ use crate::remote::sideband;
 use crate::remote::traversal;
 use crate::remote::types::{FetchResult, PullResult, PushResult, RefAdvertisement, RemoteError};
 
+/// Server response from `POST /create_repo`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CreateRemoteRepoResult {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub owner: String,
+    pub full_spec: String,
+    pub visibility: String,
+    pub clone_url: String,
+}
+
 /// HTTP transport client for interacting with remote Git servers.
 #[derive(Debug, Clone)]
 pub struct GitHttpClient {
@@ -914,6 +926,60 @@ impl GitHttpClient {
 
         Ok(())
     }
+
+    /// Initialize/create a repository on a remote `git-med-forge` server via `POST /create_repo`.
+    pub async fn create_repo(
+        &self,
+        server_url: &str,
+        repo_name: &str,
+        visibility: &str,
+        description: Option<&str>,
+        view: Option<&str>,
+    ) -> Result<CreateRemoteRepoResult, RemoteError> {
+        let origin = server_url.trim_end_matches('/');
+        let create_url = format!("{}/create_repo", origin);
+
+        let payload = serde_json::json!({
+            "repo_name": repo_name.trim(),
+            "meta": {
+                "visibility": visibility,
+                "one_line_description": description,
+                "view": view,
+            }
+        });
+
+        let req = self
+            .client
+            .post(&create_url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "git-med/0.1.0")
+            .json(&payload);
+
+        let response = self.apply_auth(req, origin).send().await?;
+        let status = response.status();
+
+        if !status.is_success() {
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".into());
+            let parsed_msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .or_else(|| v.get("error"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or(text);
+            return Err(Self::check_auth_status(status, origin, parsed_msg));
+        }
+
+        response
+            .json::<CreateRemoteRepoResult>()
+            .await
+            .map_err(|e| RemoteError::Protocol(format!("failed to parse create_repo response: {}", e)))
+    }
 }
 
 /// Helper to recursively traverse a tree root and collect all referenced raw LFS hashes.
@@ -1635,5 +1701,86 @@ mod tests {
         assert!(materialized_file.is_file(), "materialized instance file must exist");
         let content = fs::read(&materialized_file).unwrap();
         assert_eq!(content, raw_lfs_bytes, "materialized file content must match downloaded raw LFS bytes");
+    }
+
+    #[tokio::test]
+    async fn test_create_repo_posts_json_with_bearer_auth() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+        let captured_clone = captured.clone();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                *captured_clone.lock().await = req;
+
+                let body = serde_json::json!({
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "name": "my_dataset",
+                    "owner": "alice",
+                    "full_spec": "alice/my_dataset",
+                    "visibility": "public",
+                    "clone_url": "/alice/my_dataset.git"
+                })
+                .to_string();
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = GitHttpClient::new().with_token("secret-jwt-token");
+        let res = client
+            .create_repo(&server_url, "alice/my_dataset", "public", Some("Test dataset"), Some("smart"))
+            .await
+            .expect("create_repo should succeed");
+
+        assert_eq!(res.full_spec, "alice/my_dataset");
+        assert_eq!(res.clone_url, "/alice/my_dataset.git");
+
+        let req_text = captured.lock().await.clone();
+        assert!(req_text.starts_with("POST /create_repo "), "unexpected request line: {}", req_text);
+        assert!(req_text.to_lowercase().contains("authorization: bearer secret-jwt-token"));
+        assert!(req_text.contains("\"repo_name\":\"alice/my_dataset\""));
+        assert!(req_text.contains("\"visibility\":\"public\""));
+    }
+
+    #[tokio::test]
+    async fn test_create_repo_unauthorized_surfaces_login_hint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"error":"unauthorized","message":"Missing token"}"#;
+                let resp = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = GitHttpClient::new();
+        let err = client
+            .create_repo(&server_url, "my_dataset", "public", None, None)
+            .await
+            .expect_err("401 must fail");
+
+        let msg = err.to_string();
+        assert!(msg.contains("git-med login --server"), "unexpected error: {}", msg);
     }
 }

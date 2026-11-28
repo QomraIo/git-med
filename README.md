@@ -83,6 +83,32 @@ cargo install --path .
 
 ---
 
+## Server Setup (`git-med-forge`)
+
+Before pushing or cloning, start the companion [`git-med-forge`](https://github.com/QomraIo/git-med-forge) server on port `8080`:
+
+```bash
+# Option A: Docker (in-memory DB + standalone auth for local testing)
+docker run -d -p 8080:8080 \
+  -e GIT_MED_FORGE_PORT=8080 \
+  -e GIT_MED_FORGE_MEMORY_DB=true \
+  -e GIT_MED_FORGE_AUTH0_ENABLED=false \
+  --name git-med-forge \
+  ghcr.io/qomraio/git-med-forge:latest
+
+# Option B: Build and run from source
+git clone https://github.com/QomraIo/git-med-forge.git
+cd git-med-forge
+cargo build --release
+./target/release/git-med-forge --port 8080 --use-memory-db true --auth0-enabled false
+
+# Verify server is up
+curl http://localhost:8080/health
+# git-med-forge ok
+```
+
+---
+
 ## Usage Examples
 
 Once installed, invoke `git-med` directly from any directory:
@@ -92,8 +118,8 @@ Once installed, invoke `git-med` directly from any directory:
 git-med init my-dataset
 cd my-dataset
 
-# 2. Generate synthetic medical test data (e.g. DICOM series)
-git-med generate dicom ./data 2 1 3
+# 2. Generate synthetic medical test data (e.g. DICOM series) in the current directory
+git-med generate dicom . 2 1 3
 
 # 3. Stage changes (parses medical metadata and routes binary payloads to LFS)
 git-med add
@@ -104,9 +130,10 @@ git-med commit -m "Initial medical dataset import"
 # 5. Switch active imaging view (smart, dicom, brats)
 git-med view dicom
 
-# 6. Authenticate and push to remote forge server
-git-med remote add origin http://localhost:3000/alice/my-dataset.git
-git-med login --server http://localhost:3000 --username alice --password secret
+# 6. Authenticate, create remote repository on server, add origin, and push
+git-med login --server http://localhost:8080 --username alice --password secret
+git-med remote create http://localhost:8080/alice/my-dataset.git
+git-med remote add origin http://localhost:8080/alice/my-dataset.git
 git-med push origin main
 ```
 
